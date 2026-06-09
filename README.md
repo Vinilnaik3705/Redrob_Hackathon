@@ -1,4 +1,4 @@
-# Team Antigravity — India Runs Data & AI Challenge
+# Team The Gladiators — India Runs Data & AI Challenge
 
 ## Approach
 Hybrid candidate ranking pipeline combining semantic embeddings 

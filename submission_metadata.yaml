@@ -1,0 +1,93 @@
+# Redrob Hackathon — Submission Metadata Template
+#
+# Copy this file to your repo root as `submission_metadata.yaml` and fill it in.
+# The fields here should match what you submit via the portal at upload time.
+# Stage 3 review uses this file to verify your portal metadata.
+
+# ============================================================================
+# Team identity
+# ============================================================================
+team_name: "The Gladiators"  # Used in leaderboard and announcements
+
+primary_contact:
+  name: "Vinil Naik"
+  email: "vinilnaikdharavath3705@gmail.com"   # Used for all organizer communication
+  phone: "+91-XXXXXXXXXX"        # Used for top-50 / top-10 outreach
+
+team_members:
+  - name: "Vinil Naik"
+    email: "vinilnaikdharavath3705@gmail.com"
+    role: "ML Engineer"          # Optional, e.g. "Team Lead", "Backend", "Data"
+
+# ============================================================================
+# Code and reproducibility
+# ============================================================================
+github_repo: "https://github.com/Vinilnaik3705/Redrob_Hackathon"
+# Required. Must be reachable. Private repos OK if you can grant organizer
+# access at Stage 3 (the email to add will be communicated then).
+
+sandbox_link: "https://colab.research.google.com/drive/YOUR_COLAB_NOTEBOOK"
+# Required. A working hosted environment where the ranker can be run on a small
+# candidate sample. See Section 10.5 of submission_spec.md for acceptable
+# platforms (HuggingFace Spaces, Streamlit Cloud, Replit, Colab, Docker, Binder).
+
+reproduce_command: "python rank.py --candidates ./candidates.jsonl --out ./submission.csv"
+# The single command that produces submission.csv from candidates.jsonl.
+# Should run end-to-end within 5 minutes on CPU with 16GB RAM and no network.
+
+# ============================================================================
+# Compute environment
+# ============================================================================
+compute:
+  platform: "Google Colab T4 GPU / CPU"         # Or: "AWS EC2 c5.4xlarge", "Local Linux box", etc.
+  cpu_cores: 2                                  # Number of CPU cores used
+  ram_gb: 16                                    # Available RAM in GB
+  python_version: "3.11"                        # python --version
+  os: "Ubuntu 22.04 LTS"                        # Or "Ubuntu 22.04 LTS", etc.
+  uses_gpu_for_inference: false                 # Must be false — see compute constraints
+  has_network_during_ranking: false             # Must be false — no API calls during ranking
+  pre_computation_required: true                # true if you pre-compute embeddings or train models offline
+  pre_computation_time_minutes: 20              # Approximate, if applicable
+
+# ============================================================================
+# AI tools declaration
+# ============================================================================
+# Transparency only — declared use is NOT penalized. Be honest. Stage 5 interview
+# may verify these declarations against your code; declarations that contradict
+# your code or your interview are flagged.
+ai_tools_used:
+  - "Claude"        # e.g. for architecture discussion, code review
+  - "ChatGPT"
+  # Other options: "ChatGPT", "Cursor", "Gemini", "Codeium", "Other", "None"
+
+ai_usage_summary: |
+  Used Claude and ChatGPT for code review, debugging, refactoring, and structuring the pipeline.
+
+# ============================================================================
+# Approach summary (optional but recommended)
+# ============================================================================
+methodology_summary: |
+  3-stage hybrid ranking pipeline over 100K candidates for a Senior AI Engineer JD.
+  Stage 1: Hard knockout filters eliminate honeypots (fictional companies, expert skills
+  with 0 endorsements, title-experience mismatches), unrelated roles (PM/HR/Mechanical),
+  pure consulting careers, candidates outside India, and inactive profiles.
+  Stage 2: Surviving candidates scored on semantic similarity (BAAI/bge-small-en-v1.5
+  cosine sim vs JD embedding, weight 0.35), career evidence (production + retrieval
+  keywords co-occurring in same job description, weight 0.35), YOE fit tier scoring
+  (6-8yr ideal, weight 0.15), corroborated skill match (skills discounted if career
+  history has no retrieval evidence, weight 0.10), and behavioral availability signals
+  (notice period, last_active_date, recruiter_response_rate, weight 0.05).
+  Six JD-named disqualifiers applied as hard penalties: title chaser, research-only,
+  LangChain-only, closed-source only, 120d+ notice, consulting-only career.
+  Stage 3: Score sharpening via min-max stretch and power curve to natural 0.38-0.88
+  range. Rankings reproduced in under 60 seconds on CPU using precomputed embeddings.
+
+# ============================================================================
+# Declarations
+# ============================================================================
+declarations:
+  read_submission_spec: true        # I have read submission_spec.md in full
+  code_is_original_work: true       # My code is my team's original work (using AI as a tool is fine)
+  no_collusion: true                # I have not coordinated my submission with other teams
+  honeypot_check_done: true         # OPTIONAL — set true if you explicitly checked for honeypots in your ranking
+  reproduction_tested: true         # I have tested that my reproduce_command runs end-to-end
