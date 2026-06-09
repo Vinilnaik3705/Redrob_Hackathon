@@ -1,5 +1,17 @@
+import argparse
+import json
+import os
+import sys
 import re
 from datetime import datetime
+import numpy as np
+import pandas as pd
+from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
+
+# ==========================================
+# 1. DATABASE & CONFIGURATION (from scorer.py)
+# ==========================================
 
 # JD Skills Database
 JD_SKILLS = {
@@ -43,6 +55,36 @@ CONSULTING_COMPANIES = {
     "mindtree", "hcl", "hcltech", "hcl technologies", "deloitte", "kpmg", 
     "ey", "pwc", "pwc limited", "ernst & young", "pricewaterhousecoopers", "capgemini"
 }
+
+DISQUALIFIED_TITLES = [
+    'business analyst', 'hr manager', 'human resources',
+    'customer support', 'customer success', 'full stack developer',
+    'cloud engineer', 'devops', 'project manager', 'program manager',
+    'marketing manager', 'sales', 'mechanical engineer',
+    'civil engineer', 'finance', 'accountant'
+]
+
+FICTIONAL_COMPANIES = {
+    'hooli', 'pied piper', 'globex', 'initech', 'dunder mifflin',
+    'wayne enterprises', 'stark industries', 'acme corp',
+    'umbrella corporation', 'cyberdyne', 'weyland', 'buy n large',
+    'piedpiper', 'dundermifflin', 'wayneenterprises', 'starkindustries',
+    'umbrellacorporation', 'cyberdyne systems', 'weyland-yutani', 'weylandyutani'
+}
+
+# Fixed Job Description Query
+JD_QUERY = (
+    "Senior AI Engineer. Production experience with embeddings-based retrieval systems "
+    "(sentence-transformers, OpenAI embeddings, BGE, E5), vector databases or hybrid search "
+    "infrastructure (Pinecone, Weaviate, Qdrant, Milvus, OpenSearch, Elasticsearch, FAISS), Python, "
+    "evaluation frameworks for ranking systems (NDCG, MRR, MAP, offline-to-online correlation, A/B testing). "
+    "LLM fine-tuning (LoRA, QLoRA, PEFT), learning-to-rank. Startup product company experience. "
+    "Located in Noida or Pune, India."
+)
+
+# ==========================================
+# 2. SCORING UTILITIES (from scorer.py)
+# ==========================================
 
 def clean_text(text: str) -> str:
     if not text:
@@ -157,8 +199,6 @@ def is_closed_source_only(candidate: dict) -> bool:
         return True
     return False
 
-# ============ NEW HELPER FUNCTIONS FOR 3-STAGE SCORER ============
-
 def in_india(candidate: dict) -> bool:
     profile = candidate.get("profile", {})
     loc = profile.get("location", "").lower()
@@ -184,20 +224,10 @@ def is_pure_consulting(candidate: dict) -> bool:
         return False
     return all(is_consulting(job.get("company", ""), job.get("industry", "")) for job in career_history)
 
-DISQUALIFIED_TITLES = [
-    'business analyst', 'hr manager', 'human resources',
-    'customer support', 'customer success', 'full stack developer',
-    'cloud engineer', 'devops', 'project manager', 'program manager',
-    'marketing manager', 'sales', 'mechanical engineer',
-    'civil engineer', 'finance', 'accountant'
-]
-
 def is_unrelated_role(candidate: dict) -> bool:
-    import re
     profile = candidate.get("profile", {})
     title = profile.get("current_title", "").lower()
     
-    # Check disqualified titles
     for dt in DISQUALIFIED_TITLES:
         if dt == 'sales':
             if re.search(r'\bsales\b', title, re.IGNORECASE) and 'salesforce' not in title:
@@ -206,14 +236,6 @@ def is_unrelated_role(candidate: dict) -> bool:
             return True
     return False
 
-FICTIONAL_COMPANIES = {
-    'hooli', 'pied piper', 'globex', 'initech', 'dunder mifflin',
-    'wayne enterprises', 'stark industries', 'acme corp',
-    'umbrella corporation', 'cyberdyne', 'weyland', 'buy n large',
-    'piedpiper', 'dundermifflin', 'wayneenterprises', 'starkindustries',
-    'umbrellacorporation', 'cyberdyne systems', 'weyland-yutani', 'weylandyutani'
-}
-
 def is_honeypot(candidate: dict) -> bool:
     profile = candidate.get("profile", {})
     skills = candidate.get("skills", [])
@@ -221,17 +243,14 @@ def is_honeypot(candidate: dict) -> bool:
     career_history = candidate.get("career_history", [])
     yoe = profile.get("years_of_experience", 0.0)
     
-    # 1. Junior title with senior YOE contradictory flag
     if 'junior' in title.lower() and yoe > 5.0:
         return True
         
-    # 2. Fictional company check
     for job in career_history:
         company = job.get('company', '').lower()
         if any(fc in company for fc in FICTIONAL_COMPANIES):
             return True
             
-    # 3. Timeline check
     for job in career_history:
         comp = job.get("company", "")
         start = job.get("start_date")
@@ -397,6 +416,8 @@ def calculate_rules(candidate: dict) -> float:
     max_possible = 2.2 # 0.8 + 0.6 + 0.5 + 0.1 + 0.2
     return min(1.0, max(0.0, score / max_possible))
 
+calculate_rules_score = calculate_rules
+
 # Penalties helper calculations
 def title_chaser_penalty(candidate: dict) -> float:
     return 0.12 if is_title_chaser(candidate.get("career_history", [])) else 0.0
@@ -417,8 +438,6 @@ def notice_period_penalty(candidate: dict) -> float:
     elif notice_days > 30:
         return 0.04
     return 0.0
-
-# ============ MAIN ENTRANCE SCORER ============
 
 def score_candidate(candidate: dict, semantic_score: float) -> float:
     # ============ STAGE 1: HARD KNOCKOUTS ============
@@ -469,5 +488,317 @@ def score_candidate(candidate: dict, semantic_score: float) -> float:
         
     return float(max(0.0, base))
 
-# Alias for backward compatibility with precompute.py
-calculate_rules_score = calculate_rules
+# ==========================================
+# 3. REASONING & PRECOMPUTE LOGIC (from precompute.py & rank.py)
+# ==========================================
+
+def generate_reasoning(candidate, score, rank):
+    profile = candidate.get("profile", {})
+    signals = candidate.get("redrob_signals", {})
+    
+    yoe = profile.get("years_of_experience", 0.0)
+    title = profile.get("current_title", "Engineer")
+    
+    # Check for product company roles
+    product_companies = []
+    for job in candidate.get("career_history", []):
+        comp = job.get("company", "")
+        ind = job.get("industry", "")
+        if comp and not is_consulting(comp, ind):
+            if comp not in product_companies:
+                product_companies.append(comp)
+                
+    company_type = "product company" if product_companies else "services firm"
+    company_detail = f"at {company_type}"
+    if product_companies:
+        company_detail += f" ({', '.join(product_companies[:2])})"
+    
+    # Find matching skills
+    skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
+    matched = [s for s in skills_list if s.lower() in JD_SKILLS]
+    if matched:
+        skills_str = f"expertise in {', '.join(matched[:3])}"
+    else:
+        skills_str = f"skills in {', '.join(skills_list[:3])}"
+        
+    notice = signals.get("notice_period_days", 180)
+    last_active = signals.get("last_active_date", "")
+    active_days_ago = None
+    if last_active:
+        try:
+            today = datetime(2026, 6, 7)
+            active_date = datetime.strptime(last_active, "%Y-%m-%d")
+            active_days_ago = (today - active_date).days
+        except:
+            pass
+            
+    if active_days_ago is not None:
+        if active_days_ago <= 30:
+            availability = "recently active on platform"
+        elif active_days_ago <= 90:
+            availability = f"active {active_days_ago} days ago"
+        else:
+            availability = "inactive"
+    else:
+        availability = "active status unknown"
+        
+    if rank <= 10:
+        reasoning = (
+            f"Top tier candidate with {yoe:.1f} years as {title} {company_detail}. "
+            f"Strong matching {skills_str}. Profile is {availability} with a notice period of {notice} days. "
+            f"Strong fit on retrieval and evaluation requirements."
+        )
+    elif rank <= 30:
+        reasoning = (
+            f"Highly relevant {yoe:.1f}-year {title} {company_detail}. "
+            f"Possesses {skills_str}; {availability} with notice period of {notice} days."
+        )
+    else:
+        reasoning = (
+            f"Qualified {title} with {yoe:.1f} years experience {company_detail}. "
+            f"Offers {skills_str}. {availability}, {notice}d notice."
+        )
+    return reasoning
+
+def run_precompute(candidates_path, out_dir):
+    if not os.path.exists(candidates_path):
+        print(f"Error: candidates.jsonl not found at {candidates_path}")
+        sys.exit(1)
+        
+    os.makedirs(out_dir, exist_ok=True)
+    
+    print("Loading Sentence Transformer model (BAAI/bge-small-en-v1.5)...")
+    model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+    
+    candidate_ids = []
+    texts = []
+    features = []
+    honeypots = []
+    
+    print("Streaming candidates.jsonl and extracting features...")
+    count = 0
+    
+    # Read candidates to build texts
+    with open(candidates_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            c = json.loads(line)
+            
+            cid = c["candidate_id"]
+            profile = c.get("profile", {})
+            headline = profile.get("headline", "")
+            summary = profile.get("summary", "")
+            
+            career_texts = []
+            for job in c.get("career_history", []):
+                title = job.get("title", "")
+                desc = job.get("description", "")
+                company = job.get("company", "")
+                career_texts.append(f"{title} at {company}: {desc}")
+            career_history_str = " ".join(career_texts)
+            
+            skills_list = [s.get("name", "") for s in c.get("skills", [])]
+            skills_str = " ".join(skills_list)
+            
+            # Build text for semantic embedding
+            full_text = clean_text(f"{headline} {summary} {career_history_str} {skills_str}")
+            texts.append(full_text)
+            
+            rules_score = calculate_rules_score(c)
+            skill_score = calculate_skill_match_score(skills_list)
+            career_has_retrieval = check_career_for_retrieval(c.get("career_history", []))
+            if not career_has_retrieval:
+                skill_score *= 0.3
+                
+            behavioral_score = calculate_behavioral_score(c)
+            career_evidence = check_career_for_production(c.get("career_history", []))
+            
+            penalties = 0.0
+            if is_title_chaser(c.get("career_history", [])):
+                penalties += 0.15
+            if is_research_only(c.get("career_history", [])):
+                penalties += 0.15
+            if is_langchain_only(c):
+                penalties += 0.15
+            if is_closed_source_only(c):
+                penalties += 0.10
+                
+            honeypot_flag = is_honeypot(c)
+            
+            candidate_ids.append(cid)
+            features.append([rules_score, skill_score, behavioral_score, career_evidence, penalties])
+            honeypots.append(honeypot_flag)
+            
+            count += 1
+            if count % 10000 == 0:
+                print(f"Processed {count} profiles...")
+                
+    print(f"Total candidates processed: {count}")
+    
+    print("Batch encoding texts with SentenceTransformer (batch_size=256)...")
+    embeddings = model.encode(texts, batch_size=256, show_progress_bar=True, convert_to_numpy=True)
+    
+    print("Saving precomputed data to disk...")
+    np.save(os.path.join(out_dir, "embeddings.npy"), embeddings)
+    np.save(os.path.join(out_dir, "features.npy"), np.array(features, dtype=np.float32))
+    np.save(os.path.join(out_dir, "honeypots.npy"), np.array(honeypots, dtype=bool))
+    
+    with open(os.path.join(out_dir, "ids.json"), "w", encoding="utf-8") as out_f:
+        json.dump(candidate_ids, out_f)
+        
+    print("Precomputation finished successfully.")
+
+# ==========================================
+# 4. MAIN PIPELINE ENTRANCE
+# ==========================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Pipeline for Senior AI Engineer Candidate Ranking.")
+    parser.add_argument("--candidates", required=True, help="Path to candidates json/jsonl file.")
+    parser.add_argument("--out", help="Path to write the submission CSV (optional if --precompute).")
+    parser.add_argument("--precompute", action="store_true", help="Run only the precomputation step.")
+    args = parser.parse_args()
+    
+    start_time = datetime.now()
+    
+    if args.precompute:
+        print("Starting precomputation mode...")
+        # Save output in the directory of candidates file or current directory
+        out_dir = os.path.dirname(args.candidates) or "."
+        run_precompute(args.candidates, out_dir)
+        return
+        
+    if not args.out:
+        parser.error("--out is required when not running in --precompute mode.")
+        
+    print(f"Loading candidates from {args.candidates}...")
+    candidates = []
+    if args.candidates.endswith(".json"):
+        with open(args.candidates, "r", encoding="utf-8") as f:
+            candidates = json.load(f)
+    else:
+        with open(args.candidates, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    candidates.append(json.loads(line))
+                    
+    print(f"Loaded {len(candidates)} candidates.")
+    
+    # Paths for precomputed files (check candidates dir, then script dir, then current dir)
+    candidates_dir = os.path.dirname(os.path.abspath(args.candidates)) or "."
+    script_dir = os.path.dirname(os.path.abspath(__file__)) or "."
+    
+    embeddings_path = None
+    features_path = None
+    honeypots_path = None
+    ids_path = None
+    
+    for d in [candidates_dir, script_dir, "."]:
+        e_p = os.path.join(d, "embeddings.npy")
+        f_p = os.path.join(d, "features.npy")
+        h_p = os.path.join(d, "honeypots.npy")
+        i_p = os.path.join(d, "ids.json")
+        if os.path.exists(e_p) and os.path.exists(f_p) and os.path.exists(h_p) and os.path.exists(i_p):
+            embeddings_path = e_p
+            features_path = f_p
+            honeypots_path = h_p
+            ids_path = i_p
+            break
+            
+    use_precomputed = False
+    if embeddings_path:
+        print(f"Precomputed files found at {os.path.dirname(embeddings_path)}. Checking match...")
+        with open(ids_path, "r", encoding="utf-8") as f:
+            precomputed_ids = json.load(f)
+            
+        if len(candidates) == len(precomputed_ids):
+            id_match = True
+            for i in range(min(100, len(candidates))):
+                if candidates[i]["candidate_id"] != precomputed_ids[i]:
+                    id_match = False
+                    break
+            if id_match:
+                use_precomputed = True
+                print("Using precomputed features and embeddings for fast ranking.")
+                
+    if use_precomputed:
+        pre_embeddings = np.load(embeddings_path)
+        pre_honeypots = np.load(honeypots_path)
+        
+        print("Embedding job description...")
+        model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        jd_vector = model.encode([JD_QUERY])[0]
+        
+        print("Computing cosine similarity...")
+        semantic_scores = cosine_similarity([jd_vector], pre_embeddings)[0]
+        
+        print("Computing final scores...")
+        scores = []
+        for i in range(len(candidates)):
+            if pre_honeypots[i]:
+                scores.append(0.0)
+            else:
+                scores.append(score_candidate(candidates[i], semantic_scores[i]))
+    else:
+        print("Computing features and embeddings dynamically (fallback)...")
+        model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        
+        texts = []
+        for c in candidates:
+            profile = c.get("profile", {})
+            headline = profile.get("headline", "")
+            summary = profile.get("summary", "")
+            career_texts = []
+            for job in c.get("career_history", []):
+                career_texts.append(f"{job.get('title', '')} at {job.get('company', '')}: {job.get('description', '')}")
+            skills_str = " ".join([s.get("name", "") for s in c.get("skills", [])])
+            full_text = clean_text(f"{headline} {summary} {' '.join(career_texts)} {skills_str}")
+            texts.append(full_text)
+            
+        print("Embedding candidates...")
+        cand_embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True)
+        
+        print("Embedding job description...")
+        jd_vector = model.encode([JD_QUERY])[0]
+        semantic_scores = cosine_similarity([jd_vector], cand_embeddings)[0]
+        
+        print("Scoring candidates...")
+        scores = []
+        for i, c in enumerate(candidates):
+            scores.append(score_candidate(c, semantic_scores[i]))
+            
+    print("Ranking candidates...")
+    ranked_list = []
+    for i, c in enumerate(candidates):
+        ranked_list.append({
+            "candidate_id": c["candidate_id"],
+            "score": scores[i],
+            "candidate": c
+        })
+        
+    ranked_list.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+    top_100 = ranked_list[:100]
+    
+    rows = []
+    for rank_idx, item in enumerate(top_100):
+        rank = rank_idx + 1
+        cid = item["candidate_id"]
+        score = item["score"]
+        reason = generate_reasoning(item["candidate"], score, rank)
+        rows.append({
+            "candidate_id": cid,
+            "rank": rank,
+            "score": round(score, 4),
+            "reasoning": reason
+        })
+        
+    df = pd.DataFrame(rows)
+    df.to_csv(args.out, index=False, columns=["candidate_id", "rank", "score", "reasoning"])
+    
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
+    print(f"Ranking completed in {duration:.2f} seconds. Output saved to {args.out}")
+
+if __name__ == "__main__":
+    main()
