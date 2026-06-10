@@ -4,29 +4,37 @@ import os
 import sys
 import numpy as np
 import pandas as pd
+import faiss
+import torch
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-from scorer import score_candidate, is_consulting, JD_SKILLS
+from scorer import (
+    check_honeypots, check_disqualifications, clean_text,
+    score_career_retrieval, score_production_deployment,
+    score_behavioral_availability, score_skill_match,
+    score_rules_context, score_yoe, calculate_penalties,
+    is_consulting, JD_REQUIRED_SKILLS
+)
 
 # Fixed Job Description Query
 JD_QUERY = (
-    "Senior AI Engineer. Production experience with embeddings-based retrieval systems "
-    "(sentence-transformers, OpenAI embeddings, BGE, E5), vector databases or hybrid search "
-    "infrastructure (Pinecone, Weaviate, Qdrant, Milvus, OpenSearch, Elasticsearch, FAISS), Python, "
-    "evaluation frameworks for ranking systems (NDCG, MRR, MAP, offline-to-online correlation, A/B testing). "
-    "LLM fine-tuning (LoRA, QLoRA, PEFT), learning-to-rank. Startup product company experience. "
-    "Located in Noida or Pune, India."
+    "Senior AI Engineer with production experience in embeddings-based retrieval systems "
+    "(sentence-transformers, BGE, E5, OpenAI embeddings), vector databases and hybrid search "
+    "(Pinecone, Weaviate, Qdrant, Milvus, FAISS, Elasticsearch, OpenSearch), Python, "
+    "ranking evaluation frameworks (NDCG, MRR, MAP, A/B testing, offline-to-online correlation). "
+    "LLM fine-tuning (LoRA, QLoRA, PEFT), learning-to-rank. "
+    "Startup product company experience. Located in India (Noida, Pune, Hyderabad, Bangalore, Mumbai, Delhi NCR)."
 )
 
 def generate_reasoning(candidate, score, rank):
+    """Generate fact-based reasoning matching candidate profile details."""
     profile = candidate.get("profile", {})
     signals = candidate.get("redrob_signals", {})
     
     yoe = profile.get("years_of_experience", 0.0)
     title = profile.get("current_title", "Engineer")
     
-    # Check for product company roles
+    # Extract product companies
     product_companies = []
     for job in candidate.get("career_history", []):
         comp = job.get("company", "")
@@ -40,9 +48,9 @@ def generate_reasoning(candidate, score, rank):
     if product_companies:
         company_detail += f" ({', '.join(product_companies[:2])})"
     
-    # Find matching skills
+    # Skills matching
     skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
-    matched = [s for s in skills_list if s.lower() in JD_SKILLS]
+    matched = [s for s in skills_list if s.lower() in JD_REQUIRED_SKILLS]
     if matched:
         skills_str = f"expertise in {', '.join(matched[:3])}"
     else:
@@ -69,7 +77,7 @@ def generate_reasoning(candidate, score, rank):
     else:
         availability = "active status unknown"
         
-    # Diverse templates based on rank and profile data
+    # Phrasing based on tiers
     if rank <= 10:
         reasoning = (
             f"Top tier candidate with {yoe:.1f} years as {title} {company_detail}. "
@@ -109,33 +117,20 @@ def main():
                     
     print(f"Loaded {len(candidates)} candidates.")
     
-    # Paths for precomputed files (check script dir, then fallback to current dir)
     base_dir = os.path.dirname(os.path.abspath(__file__))
     embeddings_path = os.path.join(base_dir, "embeddings.npy")
-    if not os.path.exists(embeddings_path):
-        embeddings_path = "embeddings.npy"
-        
     features_path = os.path.join(base_dir, "features.npy")
-    if not os.path.exists(features_path):
-        features_path = "features.npy"
-        
     honeypots_path = os.path.join(base_dir, "honeypots.npy")
-    if not os.path.exists(honeypots_path):
-        honeypots_path = "honeypots.npy"
-        
     ids_path = os.path.join(base_dir, "ids.json")
-    if not os.path.exists(ids_path):
-        ids_path = "ids.json"
     
     use_precomputed = False
     
     if os.path.exists(embeddings_path) and os.path.exists(features_path) and os.path.exists(honeypots_path) and os.path.exists(ids_path):
-        print("Precomputed files found. Checking if they match input candidates...")
+        print("Precomputed files found. Checking compatibility...")
         with open(ids_path, "r", encoding="utf-8") as f:
             precomputed_ids = json.load(f)
             
         if len(candidates) == len(precomputed_ids):
-            # Check ID order match
             id_match = True
             for i in range(min(100, len(candidates))):
                 if candidates[i]["candidate_id"] != precomputed_ids[i]:
@@ -150,70 +145,162 @@ def main():
         pre_features = np.load(features_path)
         pre_honeypots = np.load(honeypots_path)
         
-        # Load Sentence Transformer to embed the JD
-        print("Embedding job description...")
-        model = SentenceTransformer('BAAI/bge-small-en-v1.5')
-        jd_vector = model.encode([JD_QUERY])[0]
+        # Build FAISS index of survivors (non-honeypot, non-disqualified)
+        survivor_indices = np.where(~pre_honeypots)[0]
         
-        print("Computing cosine similarity...")
-        semantic_scores = cosine_similarity([jd_vector], pre_embeddings)[0]
-        
-        print("Computing final scores...")
-        scores = []
-        for i in range(len(candidates)):
-            if pre_honeypots[i]:
-                scores.append(0.0)
-            else:
-                scores.append(score_candidate(candidates[i], semantic_scores[i]))
+        if len(survivor_indices) == 0:
+            print("Warning: All candidates were disqualified in Stage 1!")
+            top_100_items = []
+        else:
+            survivor_embeddings = pre_embeddings[survivor_indices]
+            
+            print("Embedding job description...")
+            model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
+            jd_vector = model.encode([JD_QUERY])[0].astype(np.float32)
+            jd_vector = jd_vector.reshape(1, -1)
+            
+            # Normalize embeddings for cosine similarity
+            faiss.normalize_L2(survivor_embeddings)
+            faiss.normalize_L2(jd_vector)
+            
+            # FAISS Index
+            dimension = 384
+            index = faiss.IndexFlatIP(dimension)
+            index.add(survivor_embeddings)
+            
+            # Search top 3000 semantic matches
+            k = min(3000, len(survivor_indices))
+            D, I = index.search(jd_vector, k)
+            
+            # I[0] contains indices in survivor_embeddings, D[0] contains similarity scores
+            scored_candidates = []
+            for j in range(k):
+                surv_idx = I[0][j]
+                orig_idx = survivor_indices[surv_idx]
+                semantic_score = float(D[0][j])
+                
+                # Load precomputed features
+                feat = pre_features[orig_idx]
+                retrieval_score = float(feat[0])
+                production_score = float(feat[1])
+                skill_score = float(feat[2])
+                behavioral_score = float(feat[3])
+                rules_score = float(feat[4])
+                yoe_score = float(feat[5])
+                penalties_total = float(feat[6])
+                
+                # Combine score
+                final_score = (
+                    0.30 * semantic_score +
+                    0.25 * retrieval_score +
+                    0.20 * production_score +
+                    0.15 * behavioral_score +
+                    0.07 * skill_score +
+                    0.03 * rules_score -
+                    penalties_total
+                )
+                final_score = max(0.0, final_score)
+                
+                # Override Hard Cap if zero retrieval evidence
+                if retrieval_score == 0.0:
+                    final_score = min(0.25, final_score)
+                    
+                scored_candidates.append({
+                    "candidate_id": candidates[orig_idx]["candidate_id"],
+                    "score": final_score,
+                    "candidate": candidates[orig_idx]
+                })
+                
+            # Sort and rank (tie-break: score desc, then candidate_id asc)
+            scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+            top_100_items = scored_candidates[:100]
     else:
         print("Computing features and embeddings dynamically (fallback)...")
-        # Load Sentence Transformer model
-        model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Build texts for candidates
-        texts = []
-        for c in candidates:
-            profile = c.get("profile", {})
-            headline = profile.get("headline", "")
-            summary = profile.get("summary", "")
-            career_texts = []
-            for job in c.get("career_history", []):
-                career_texts.append(f"{job.get('title', '')} at {job.get('company', '')}: {job.get('description', '')}")
-            skills_str = " ".join([s.get("name", "") for s in c.get("skills", [])])
-            full_text = f"{headline} {summary} {' '.join(career_texts)} {skills_str}"
-            texts.append(full_text)
+        # Run hard knockouts
+        survivors = []
+        survivor_orig_indices = []
+        for idx, c in enumerate(candidates):
+            if not check_honeypots(c) and not check_disqualifications(c):
+                survivors.append(c)
+                survivor_orig_indices.append(idx)
+                
+        print(f"Survivors after Stage 1 hard filters: {len(survivors)}")
+        
+        if len(survivors) == 0:
+            top_100_items = []
+        else:
+            # Build texts for survivors
+            texts = []
+            for c in survivors:
+                profile = c.get("profile", {})
+                headline = profile.get("headline", "")
+                summary = profile.get("summary", "")
+                career_texts = []
+                for job in c.get("career_history", []):
+                    career_texts.append(f"{job.get('title', '')} at {job.get('company', '')}: {job.get('description', '')}")
+                skills_str = " ".join([s.get("name", "") for s in c.get("skills", [])])
+                full_text = clean_text(f"{headline} {summary} {' '.join(career_texts)} {skills_str}")
+                texts.append(full_text)
+                
+            print("Embedding survivors...")
+            surv_embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True).astype(np.float32)
             
-        print("Embedding candidates...")
-        cand_embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True)
-        
-        print("Embedding job description...")
-        jd_vector = model.encode([JD_QUERY])[0]
-        semantic_scores = cosine_similarity([jd_vector], cand_embeddings)[0]
-        
-        print("Scoring candidates...")
-        scores = []
-        for i, c in enumerate(candidates):
-            scores.append(score_candidate(c, semantic_scores[i]))
+            print("Embedding job description...")
+            jd_vector = model.encode([JD_QUERY])[0].astype(np.float32)
+            jd_vector = jd_vector.reshape(1, -1)
             
-    # Sort and rank
-    print("Ranking candidates...")
-    ranked_list = []
-    for i, c in enumerate(candidates):
-        ranked_list.append({
-            "candidate_id": c["candidate_id"],
-            "score": scores[i],
-            "candidate": c
-        })
-        
-    # Tie-breaking: score descending (rounded to 4 decimals), then candidate_id ascending
-    ranked_list.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
-    
-    # Select top 100
-    top_100 = ranked_list[:100]
-    
-    # Generate CSV content
+            faiss.normalize_L2(surv_embeddings)
+            faiss.normalize_L2(jd_vector)
+            
+            dimension = 384
+            index = faiss.IndexFlatIP(dimension)
+            index.add(surv_embeddings)
+            
+            k = min(3000, len(survivors))
+            D, I = index.search(jd_vector, k)
+            
+            scored_candidates = []
+            for j in range(k):
+                surv_idx = I[0][j]
+                c = survivors[surv_idx]
+                semantic_score = float(D[0][j])
+                
+                # Dynamic feature extraction
+                retrieval_score = score_career_retrieval(c)
+                production_score = score_production_deployment(c)
+                skill_score = score_skill_match(c)
+                behavioral_score = score_behavioral_availability(c)
+                rules_score = score_rules_context(c)
+                penalties_total = calculate_penalties(c)
+                
+                final_score = (
+                    0.30 * semantic_score +
+                    0.25 * retrieval_score +
+                    0.20 * production_score +
+                    0.15 * behavioral_score +
+                    0.07 * skill_score +
+                    0.03 * rules_score -
+                    penalties_total
+                )
+                final_score = max(0.0, final_score)
+                
+                if retrieval_score == 0.0:
+                    final_score = min(0.25, final_score)
+                    
+                scored_candidates.append({
+                    "candidate_id": c["candidate_id"],
+                    "score": final_score,
+                    "candidate": c
+                })
+                
+            scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+            top_100_items = scored_candidates[:100]
+            
+    # Output top 100 to CSV
     rows = []
-    for rank_idx, item in enumerate(top_100):
+    for rank_idx, item in enumerate(top_100_items):
         rank = rank_idx + 1
         cid = item["candidate_id"]
         score = item["score"]

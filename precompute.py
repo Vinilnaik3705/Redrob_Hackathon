@@ -4,9 +4,10 @@ import sys
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from scorer import (
-    calculate_rules_score, calculate_skill_match_score, calculate_behavioral_score, 
-    is_honeypot, clean_text, check_career_for_production, check_career_for_retrieval, 
-    is_title_chaser, is_research_only, is_langchain_only, is_closed_source_only
+    check_honeypots, check_disqualifications, clean_text,
+    score_career_retrieval, score_production_deployment,
+    score_behavioral_availability, score_skill_match,
+    score_rules_context, score_yoe, calculate_penalties
 )
 
 candidates_path = "candidates.jsonl"
@@ -15,23 +16,23 @@ out_dir = "."
 if not os.path.exists(candidates_path):
     # Fallback to local Windows path
     candidates_path = r"c:\Users\VINIL NAIK\OneDrive\Desktop\[PUB] India_runs_data_and_ai_challenge\[PUB] India_runs_data_and_ai_challenge\India_runs_data_and_ai_challenge\candidates.jsonl"
-    out_dir = r"c:\Users\VINIL NAIK\OneDrive\Desktop\[PUB] India_runs_data_and_ai_challenge\hackathon"
 
 if not os.path.exists(candidates_path):
     print(f"Error: candidates.jsonl not found at {candidates_path}")
     sys.exit(1)
 
-os.makedirs(out_dir, exist_ok=True)
+import torch
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+print(f"Loading Sentence Transformer model (BAAI/bge-small-en-v1.5) on {device}...")
+model = SentenceTransformer('BAAI/bge-small-en-v1.5', device=device)
 
-print("Loading Sentence Transformer model (BAAI/bge-small-en-v1.5)...")
-model = SentenceTransformer('BAAI/bge-small-en-v1.5')
 
 candidate_ids = []
 texts = []
 features = []
 honeypots = []
 
-print("Streaming candidates.jsonl and extracting features...")
+print("Streaming candidates.jsonl and precomputing features...")
 count = 0
 
 with open(candidates_path, "r", encoding="utf-8") as f:
@@ -44,7 +45,9 @@ with open(candidates_path, "r", encoding="utf-8") as f:
         profile = c.get("profile", {})
         headline = profile.get("headline", "")
         summary = profile.get("summary", "")
+        yoe = profile.get("years_of_experience", 0.0)
         
+        # Build text representation for BGE embeddings
         career_texts = []
         for job in c.get("career_history", []):
             title = job.get("title", "")
@@ -56,38 +59,32 @@ with open(candidates_path, "r", encoding="utf-8") as f:
         skills_list = [s.get("name", "") for s in c.get("skills", [])]
         skills_str = " ".join(skills_list)
         
-        # Build text for semantic embedding
         full_text = clean_text(f"{headline} {summary} {career_history_str} {skills_str}")
         texts.append(full_text)
         
-        # Precompute rule, skill, and behavioral scores + honeypot flag
-        rules_score = calculate_rules_score(c)
+        # Check honeypots & disqualifications
+        is_bad = check_honeypots(c) or check_disqualifications(c)
         
-        # Skills match corroboration
-        skill_score = calculate_skill_match_score(skills_list)
-        career_has_retrieval = check_career_for_retrieval(c.get("career_history", []))
-        if not career_has_retrieval:
-            skill_score *= 0.3
-            
-        behavioral_score = calculate_behavioral_score(c)
-        career_evidence = check_career_for_production(c.get("career_history", []))
-        
-        # Penalties calculation
-        penalties = 0.0
-        if is_title_chaser(c.get("career_history", [])):
-            penalties += 0.15
-        if is_research_only(c.get("career_history", [])):
-            penalties += 0.15
-        if is_langchain_only(c):
-            penalties += 0.15
-        if is_closed_source_only(c):
-            penalties += 0.10
-            
-        honeypot_flag = is_honeypot(c)
+        # Precompute features
+        retrieval_score = score_career_retrieval(c)
+        production_score = score_production_deployment(c)
+        skill_score = score_skill_match(c)
+        behavioral_score = score_behavioral_availability(c)
+        rules_score = score_rules_context(c)
+        yoe_score = score_yoe(yoe)
+        penalties_total = calculate_penalties(c)
         
         candidate_ids.append(cid)
-        features.append([rules_score, skill_score, behavioral_score, career_evidence, penalties])
-        honeypots.append(honeypot_flag)
+        features.append([
+            retrieval_score, 
+            production_score, 
+            skill_score, 
+            behavioral_score, 
+            rules_score, 
+            yoe_score, 
+            penalties_total
+        ])
+        honeypots.append(is_bad)
         
         count += 1
         if count % 10000 == 0:
@@ -98,7 +95,6 @@ print(f"Total candidates processed: {count}")
 print("Batch encoding texts with SentenceTransformer (batch_size=256)...")
 embeddings = model.encode(texts, batch_size=256, show_progress_bar=True, convert_to_numpy=True)
 
-# Save precomputed arrays
 print("Saving precomputed data to disk...")
 np.save(os.path.join(out_dir, "embeddings.npy"), embeddings)
 np.save(os.path.join(out_dir, "features.npy"), np.array(features, dtype=np.float32))

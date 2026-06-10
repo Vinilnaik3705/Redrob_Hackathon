@@ -12,7 +12,7 @@ team_name: "The Gladiators"  # Used in leaderboard and announcements
 primary_contact:
   name: "Vinil Naik"
   email: "vinilnaikdharavath3705@gmail.com"   # Used for all organizer communication
-  phone: "+91-XXXXXXXXXX"        # Used for top-50 / top-10 outreach
+  phone: "+91-9642033763"        # Used for top-50 / top-10 outreach
 
 team_members:
   - name: "Vinil Naik"
@@ -57,11 +57,10 @@ compute:
 # your code or your interview are flagged.
 ai_tools_used:
   - "Claude"        # e.g. for architecture discussion, code review
-  - "ChatGPT"
-  # Other options: "ChatGPT", "Cursor", "Gemini", "Codeium", "Other", "None"
+  - "Antigravity"   # e.g. for autocomplete
 
 ai_usage_summary: |
-  Used Claude and ChatGPT for code review, debugging, refactoring, and structuring the pipeline.
+  Used Claude and Antigravity for code review, debugging, refactoring, and structuring the pipeline.
 
 # ============================================================================
 # Approach summary (optional but recommended)
