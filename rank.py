@@ -28,6 +28,9 @@ JD_QUERY = (
 
 def generate_reasoning(candidate, score, rank):
     """Generate fact-based reasoning matching candidate profile details."""
+    if score == 0.0:
+        return "Profile eliminated during Stage 1 screening due to hard knockout rules (Honeypot or Role Disqualification)."
+        
     profile = candidate.get("profile", {})
     signals = candidate.get("redrob_signals", {})
     
@@ -151,9 +154,15 @@ def main():
         # Build FAISS index of survivors (non-honeypot, non-disqualified)
         survivor_indices = np.where(~pre_honeypots)[0]
         
+        scored_candidates = []
         if len(survivor_indices) == 0:
             print("Warning: All candidates were disqualified in Stage 1!")
-            top_100_items = []
+            for idx in range(len(candidates)):
+                scored_candidates.append({
+                    "candidate_id": candidates[idx]["candidate_id"],
+                    "score": 0.0,
+                    "candidate": candidates[idx]
+                })
         else:
             survivor_embeddings = pre_embeddings[survivor_indices]
             
@@ -176,7 +185,6 @@ def main():
             D, I = index.search(jd_vector, k)
             
             # I[0] contains indices in survivor_embeddings, D[0] contains similarity scores
-            scored_candidates = []
             for j in range(k):
                 surv_idx = I[0][j]
                 orig_idx = survivor_indices[surv_idx]
@@ -214,9 +222,20 @@ def main():
                     "candidate": candidates[orig_idx]
                 })
                 
-            # Sort and rank (tie-break: score desc, then candidate_id asc)
-            scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
-            top_100_items = scored_candidates[:100]
+            # Add all other candidates (disqualified + non-top 3000 survivors) with 0.0 score
+            scored_ids = {x["candidate_id"] for x in scored_candidates}
+            for idx in range(len(candidates)):
+                cid = candidates[idx]["candidate_id"]
+                if cid not in scored_ids:
+                    scored_candidates.append({
+                        "candidate_id": cid,
+                        "score": 0.0,
+                        "candidate": candidates[idx]
+                    })
+                    
+        # Sort and rank (tie-break: score desc, then candidate_id asc)
+        scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+        top_100_items = scored_candidates[:min(100, len(scored_candidates))]
     else:
         print("Computing features and embeddings dynamically (fallback)...")
         model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
@@ -231,8 +250,14 @@ def main():
                 
         print(f"Survivors after Stage 1 hard filters: {len(survivors)}")
         
+        scored_candidates = []
         if len(survivors) == 0:
-            top_100_items = []
+            for c in candidates:
+                scored_candidates.append({
+                    "candidate_id": c["candidate_id"],
+                    "score": 0.0,
+                    "candidate": c
+                })
         else:
             # Build texts for survivors
             texts = []
@@ -264,7 +289,6 @@ def main():
             k = min(3000, len(survivors))
             D, I = index.search(jd_vector, k)
             
-            scored_candidates = []
             for j in range(k):
                 surv_idx = I[0][j]
                 c = survivors[surv_idx]
@@ -298,8 +322,18 @@ def main():
                     "candidate": c
                 })
                 
-            scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
-            top_100_items = scored_candidates[:100]
+            # Add all other candidates (disqualified + non-top 3000 survivors) with 0.0 score
+            scored_ids = {x["candidate_id"] for x in scored_candidates}
+            for c in candidates:
+                if c["candidate_id"] not in scored_ids:
+                    scored_candidates.append({
+                        "candidate_id": c["candidate_id"],
+                        "score": 0.0,
+                        "candidate": c
+                    })
+                    
+        scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+        top_100_items = scored_candidates[:min(100, len(scored_candidates))]
             
     # Output top 100 to CSV
     rows = []
