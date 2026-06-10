@@ -100,7 +100,10 @@ def main():
     parser = argparse.ArgumentParser(description="Rank candidates for Senior AI Engineer.")
     parser.add_argument("--candidates", required=True, help="Path to candidates json/jsonl file.")
     parser.add_argument("--out", required=True, help="Path to write the submission CSV.")
+    parser.add_argument("--jd", required=False, help="Custom Job Description query text.")
     args = parser.parse_args()
+    
+    jd_query = args.jd if args.jd else JD_QUERY
     
     start_time = datetime.now()
     
@@ -156,7 +159,7 @@ def main():
             
             print("Embedding job description...")
             model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
-            jd_vector = model.encode([JD_QUERY])[0].astype(np.float32)
+            jd_vector = model.encode([jd_query])[0].astype(np.float32)
             jd_vector = jd_vector.reshape(1, -1)
             
             # Normalize embeddings for cosine similarity
@@ -248,7 +251,7 @@ def main():
             surv_embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True).astype(np.float32)
             
             print("Embedding job description...")
-            jd_vector = model.encode([JD_QUERY])[0].astype(np.float32)
+            jd_vector = model.encode([jd_query])[0].astype(np.float32)
             jd_vector = jd_vector.reshape(1, -1)
             
             faiss.normalize_L2(surv_embeddings)
