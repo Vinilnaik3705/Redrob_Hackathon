@@ -64,20 +64,7 @@ DEFAULT_JD = (
 
 # Sidebar configuration
 st.sidebar.header("⚙️ Configuration")
-st.sidebar.markdown("""
-This Space runs **Stage 1 (Hard Knockouts)** and **Stage 2 (FAISS Cosine Similarity)** followed by **Stage 3 (Multi-Signal Scoring)** dynamically on CPU.
-""")
-
-# Show scoring weight distribution in sidebar
-st.sidebar.subheader("Weights Distribution")
-st.sidebar.write("🎯 Semantic Similarity: **30%**")
-st.sidebar.write("🔍 Career Retrieval: **25%**")
-st.sidebar.write("⚙️ Production Deployment: **20%**")
-st.sidebar.write("📅 Behavioral Availability: **15%**")
-st.sidebar.write("🛠️ Skill Match & Boost: **7%**")
-st.sidebar.write("🌐 Context / Relocation Fit: **3%**")
-
-st.sidebar.info("Note: Negative multipliers (penalties) are applied dynamically for over-experience, title-chasers, consulting backgrounds, and inactive profiles.")
+st.sidebar.write("Upload your candidate dataset in the main panel to begin.")
 
 # Main layout split
 col1, col2 = st.columns([1.5, 1])
@@ -142,7 +129,7 @@ if uploaded_file is not None:
                     if os.path.exists(temp_output_path):
                         df = pd.read_csv(temp_output_path)
                         
-                        st.subheader("🏆 Top 100 Ranked Candidates")
+                        st.subheader("🏆 Top Ranked Candidates")
                         
                         # Show stats
                         stat_col1, stat_col2, stat_col3 = st.columns(3)
@@ -151,14 +138,14 @@ if uploaded_file is not None:
                         with stat_col2:
                             st.metric("Max Score", f"{df['score'].max():.4f}")
                         with stat_col3:
-                            st.metric("Min Score (Top 100)", f"{df['score'].min():.4f}")
+                            st.metric("Min Score", f"{df['score'].min():.4f}")
                         
                         # Download button
                         csv_data = df.to_csv(index=False).encode('utf-8')
                         st.download_button(
-                            label="📥 Download submission.csv",
+                            label="📥 Download team_The_Gladiators.csv",
                             data=csv_data,
-                            file_name="submission.csv",
+                            file_name="team_The_Gladiators.csv",
                             mime="text/csv"
                         )
                         
