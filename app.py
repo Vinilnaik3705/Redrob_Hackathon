@@ -49,7 +49,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div class='main-title'>Redrob AI Candidate Ranking System</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>Candidate Ranking System</div>", unsafe_allow_html=True)
 st.markdown("<div class='subtitle'>A hybrid semantic & rule-based pipeline for screening Senior AI Engineers</div>", unsafe_allow_html=True)
 
 # Default Job Description Query
@@ -70,9 +70,9 @@ st.sidebar.write("Upload your candidate dataset in the main panel to begin.")
 col1, col2 = st.columns([1.5, 1])
 
 with col1:
-    st.subheader("Target Job Description (JD)")
+    st.subheader("Job Description (JD)")
     jd_query = st.text_area(
-        "Edit the query text used for semantic matching (embedded using BAAI/bge-small-en-v1.5):",
+        "Edit the query text:",
         value=DEFAULT_JD,
         height=180
     )
