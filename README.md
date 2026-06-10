@@ -122,7 +122,7 @@ We implement an advanced **4-stage candidate ranking pipeline** designed to iden
 pip install -r requirements.txt
 ```
 
-### 2. Precompute embeddings (One-time, ~20 min on CPU / ~5 min on GPU)
+### 2. Precompute embeddings (One-time, ~8 hours on CPU / ~20 min on GPU)
 
 Generates local cached vector files (`embeddings.npy`, `features.npy`, `honeypots.npy`, and `ids.json`) to allow sub-minute execution on CPU:
 ```bash
