@@ -49,7 +49,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-st.markdown("<div class='main-title'>🎖️ Redrob AI Candidate Ranking System</div>", unsafe_allow_html=True)
+st.markdown("<div class='main-title'>Redrob AI Candidate Ranking System</div>", unsafe_allow_html=True)
 st.markdown("<div class='subtitle'>A hybrid semantic & rule-based pipeline for screening Senior AI Engineers</div>", unsafe_allow_html=True)
 
 # Default Job Description Query
@@ -63,14 +63,14 @@ DEFAULT_JD = (
 )
 
 # Sidebar configuration
-st.sidebar.header("⚙️ Configuration")
+st.sidebar.header("Configuration")
 st.sidebar.write("Upload your candidate dataset in the main panel to begin.")
 
 # Main layout split
 col1, col2 = st.columns([1.5, 1])
 
 with col1:
-    st.subheader("📝 Target Job Description (JD)")
+    st.subheader("Target Job Description (JD)")
     jd_query = st.text_area(
         "Edit the query text used for semantic matching (embedded using BAAI/bge-small-en-v1.5):",
         value=DEFAULT_JD,
@@ -78,7 +78,7 @@ with col1:
     )
 
 with col2:
-    st.subheader("📤 Upload Candidates Dataset")
+    st.subheader("Upload Candidates Dataset")
     uploaded_file = st.file_uploader(
         "Upload a JSON or JSONL file of candidates:",
         type=["json", "jsonl"],
@@ -92,7 +92,7 @@ with col2:
 st.write("---")
 
 if uploaded_file is not None:
-    if st.button("🚀 Run Candidate Ranking Engine"):
+    if st.button("Run Candidate Ranking Engine"):
         with st.status("Processing candidates...", expanded=True) as status_box:
             # Create a temporary directory to store files
             with tempfile.TemporaryDirectory() as temp_dir:
@@ -129,7 +129,7 @@ if uploaded_file is not None:
                     if os.path.exists(temp_output_path):
                         df = pd.read_csv(temp_output_path)
                         
-                        st.subheader("🏆 Top Ranked Candidates")
+                        st.subheader("Top Ranked Candidates")
                         
                         # Show stats
                         stat_col1, stat_col2, stat_col3 = st.columns(3)
@@ -143,7 +143,7 @@ if uploaded_file is not None:
                         # Download button
                         csv_data = df.to_csv(index=False).encode('utf-8')
                         st.download_button(
-                            label="📥 Download team_The_Gladiators.csv",
+                            label="Download team_The_Gladiators.csv",
                             data=csv_data,
                             file_name="team_The_Gladiators.csv",
                             mime="text/csv"
@@ -166,4 +166,4 @@ if uploaded_file is not None:
                     st.error("Error executing ranking pipeline:")
                     st.code(result.stderr)
 else:
-    st.info("💡 Please upload a candidates dataset to start the ranking process.")
+    st.info("Please upload a candidates dataset to start the ranking process.")
