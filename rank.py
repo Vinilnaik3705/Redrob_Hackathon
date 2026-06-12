@@ -27,95 +27,154 @@ JD_QUERY = (
 )
 
 def generate_reasoning(candidate, score, rank):
-    """Generate fact-based reasoning matching candidate profile details."""
-    if score == 0.0:
-        return "Profile eliminated during Stage 1 screening due to hard knockout rules (Honeypot or Role Disqualification)."
-        
     profile = candidate.get("profile", {})
     signals = candidate.get("redrob_signals", {})
+    career = candidate.get("career_history", [])
     
     yoe = profile.get("years_of_experience", 0.0)
     title = profile.get("current_title", "Engineer")
+    notice = signals.get("notice_period_days", 180)
     
-    # Extract all companies for reasoning to ensure factual correctness
+    # ALWAYS use ACTUAL companies from career_history — never filter
+    # Show top 2 actual companies regardless of type
     all_companies = []
-    for job in candidate.get("career_history", []):
-        comp = job.get("company", "")
-        if comp and comp not in all_companies:
+    seen = set()
+    for job in career:
+        comp = job.get("company", "").strip()
+        if comp and comp not in seen:
             all_companies.append(comp)
+            seen.add(comp)
             
-    # Categorize company background to distinguish product, services, and mixed backgrounds
-    product_companies = []
-    cons_companies = []
-    for job in candidate.get("career_history", []):
-        comp = job.get("company", "")
-        ind = job.get("industry", "")
-        if comp:
-            if is_consulting(comp, ind):
-                if comp not in cons_companies:
-                    cons_companies.append(comp)
-            else:
-                if comp not in product_companies:
-                    product_companies.append(comp)
-                    
-    if not product_companies and cons_companies:
-        company_type = "services firm"
-    elif product_companies and cons_companies:
-        company_type = "mixed background"
+    # Classify background honestly
+    consulting_names = {
+        "tcs", "tata consultancy", "infosys", "wipro", "accenture",
+        "cognizant", "capgemini", "tech mahindra", "hcl", "hcltech",
+        "deloitte", "kpmg", "ey", "ernst", "pwc", "mindtree",
+        "mu sigma", "fractal analytics", "mphasis", "hexaware", "ltimindtree"
+    }
+    
+    def is_consulting_company(name):
+        return any(c in name.lower() for c in consulting_names)
+        
+    product_cos = [c for c in all_companies if not is_consulting_company(c)]
+    consulting_cos = [c for c in all_companies if is_consulting_company(c)]
+    
+    # Honest background label
+    if not consulting_cos:
+        background = "product company"
+    elif not product_cos:
+        background = "services firm"
     else:
-        company_type = "product company"
+        background = "mixed background"  # Has both — be honest
+        
+    # Show actual companies (top 2) — NEVER substitute or filter
+    display_companies = all_companies[:2]
+    company_detail = f"at {background} ({', '.join(display_companies)})" if display_companies else f"at {background}"
     
-    company_detail = f"at {company_type}"
-    if all_companies:
-        company_detail += f" ({', '.join(all_companies[:2])})"
-    
-    # Skills matching
+    # Skills — only from actual skills[] array
     skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
     matched = [s for s in skills_list if s.lower() in JD_REQUIRED_SKILLS]
     if matched:
         skills_str = f"expertise in {', '.join(matched[:3])}"
     else:
-        skills_str = f"skills in {', '.join(skills_list[:3])}"
+        # Fall back to top actual skills — never invent
+        skills_str = f"skills including {', '.join(skills_list[:3])}" if skills_list else "general ML skills"
         
-    notice = signals.get("notice_period_days", 180)
+    # Availability — from actual signals
     last_active = signals.get("last_active_date", "")
     active_days_ago = None
     if last_active:
         try:
             today = datetime(2026, 6, 7)
-            active_date = datetime.strptime(last_active, "%Y-%m-%d")
-            active_days_ago = (today - active_date).days
+            active_days_ago = (today - datetime.strptime(last_active, "%Y-%m-%d")).days
         except:
             pass
             
     if active_days_ago is not None:
         if active_days_ago <= 30:
-            availability = "recently active on platform"
+            availability = "recently active"
         elif active_days_ago <= 90:
             availability = f"active {active_days_ago} days ago"
+        elif active_days_ago <= 180:
+            availability = f"last active {active_days_ago} days ago"
         else:
-            availability = "inactive"
+            availability = "inactive for 6+ months"
     else:
-        availability = "active status unknown"
+        last_days = signals.get("last_active_days_ago")
+        if last_days is not None:
+            if last_days <= 30:
+                availability = "recently active"
+            elif last_days <= 90:
+                availability = f"active {last_days} days ago"
+            else:
+                availability = f"inactive {last_days} days"
+        else:
+            availability = "activity unknown"
+            
+    # Honest concerns — pull from actual data
+    concerns = []
+    if notice > 90:
+        concerns.append(f"long notice period ({notice}d)")
+    if "research" in title.lower() and not any(
+        kw in " ".join(j.get("description","") for j in career).lower()
+        for kw in ["production","deployed","shipped","scale"]
+    ):
+        concerns.append("research-focused background — production depth unclear")
+    if consulting_cos and not product_cos:
+        concerns.append("consulting-only background")
+    if yoe > 12:
+        concerns.append("senior tenure — verify active coding role")
+    if yoe < 4:
+        concerns.append("below ideal experience range")
         
-    # Phrasing based on tiers
+    concern_str = f" Concern: {'; '.join(concerns[:2])}." if concerns else ""
+    
+    # Build reasoning with UNIQUE elements per candidate
     if rank <= 10:
         reasoning = (
-            f"Top tier candidate with {yoe:.1f} years as {title} {company_detail}. "
-            f"Strong matching {skills_str}. Profile is {availability} with a notice period of {notice} days. "
-            f"Strong fit on retrieval and evaluation requirements."
+            f"{yoe:.1f}-year {title} {company_detail}. "
+            f"Strong {skills_str}; {availability}, notice {notice}d.{concern_str}"
         )
     elif rank <= 30:
         reasoning = (
-            f"Highly relevant {yoe:.1f}-year {title} {company_detail}. "
-            f"Possesses {skills_str}; {availability} with notice period of {notice} days."
+            f"{yoe:.1f}-year {title} {company_detail}. "
+            f"Relevant {skills_str}; {availability}, {notice}d notice.{concern_str}"
+        )
+    elif rank <= 60:
+        reasoning = (
+            f"{title} ({yoe:.1f}yr) {company_detail}. "
+            f"{skills_str.capitalize()}; {availability}.{concern_str}"
         )
     else:
         reasoning = (
-            f"Qualified {title} with {yoe:.1f} years experience {company_detail}. "
-            f"Offers {skills_str}. {availability}, {notice}d notice."
+            f"{yoe:.1f}-year {title} {company_detail}. "
+            f"{skills_str.capitalize()}; {notice}d notice, {availability}.{concern_str}"
         )
+        
     return reasoning
+
+def make_unique_reasonings(rows):
+    seen = {}
+    for row in rows:
+        base = row['reasoning']
+        if base in seen:
+            sig = row.get('_signals', {})
+            response = sig.get('recruiter_response_rate', 0)
+            github = sig.get('github_activity_score', 0)
+            open_flag = sig.get('open_to_work_flag', False)
+            
+            if open_flag:
+                extra = " Actively seeking new opportunities."
+            elif github and github > 0:
+                extra = f" GitHub activity score: {github:.0f}."
+            elif response:
+                extra = f" Platform response rate: {response:.0%}."
+            else:
+                extra = f" Ranked #{row['rank']} by composite score."
+                
+            row['reasoning'] = base + extra
+        seen[base] = True
+    return rows
 
 def main():
     parser = argparse.ArgumentParser(description="Rank candidates for Senior AI Engineer.")
@@ -231,11 +290,15 @@ def main():
                 )
                 final_score = max(0.0, final_score)
                 
-                # Override Hard Cap if zero retrieval evidence
+                # Override Hard Cap if zero retrieval evidence with graduated penalty
                 if retrieval_score == 0.0:
-                    final_score = min(0.25, final_score)
-                    # Deduct a tiny offset to keep zero-retrieval scores unique and untied
-                    final_score -= (1.0 - semantic_score) * 0.01
+                    # Semantic score still counts but heavily discounted
+                    base = semantic_score * 0.25  # max 0.25 for zero retrieval
+                    final_score = max(0.0, base)
+                elif retrieval_score < 0.3:
+                    # Weak retrieval — partial discount
+                    multiplier = 0.5 + (retrieval_score / 0.3) * 0.3  # 0.5 to 0.8
+                    final_score = final_score * multiplier
                     
                 scored_candidates.append({
                     "candidate_id": candidates[orig_idx]["candidate_id"],
@@ -254,6 +317,8 @@ def main():
                         "candidate": candidates[idx]
                     })
                     
+        # Filter out zero-score candidates first
+        scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
         # Sort and rank (tie-break: score desc, then candidate_id asc)
         scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
         top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
@@ -335,9 +400,13 @@ def main():
                 final_score = max(0.0, final_score)
                 
                 if retrieval_score == 0.0:
-                    final_score = min(0.25, final_score)
-                    # Deduct a tiny offset to keep zero-retrieval scores unique and untied
-                    final_score -= (1.0 - semantic_score) * 0.01
+                    # Semantic score still counts but heavily discounted
+                    base = semantic_score * 0.25  # max 0.25 for zero retrieval
+                    final_score = max(0.0, base)
+                elif retrieval_score < 0.3:
+                    # Weak retrieval — partial discount
+                    multiplier = 0.5 + (retrieval_score / 0.3) * 0.3  # 0.5 to 0.8
+                    final_score = final_score * multiplier
                     
                 scored_candidates.append({
                     "candidate_id": c["candidate_id"],
@@ -355,6 +424,7 @@ def main():
                         "candidate": c
                     })
                     
+        scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
         scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
         top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
             
@@ -369,9 +439,16 @@ def main():
             "candidate_id": cid,
             "rank": rank,
             "score": round(score, 4),
-            "reasoning": reason
+            "reasoning": reason,
+            "_signals": item["candidate"].get("redrob_signals", {})
         })
         
+    rows = make_unique_reasonings(rows)
+    # Remove temporary _signals key
+    for r in rows:
+        if "_signals" in r:
+            del r["_signals"]
+            
     df = pd.DataFrame(rows)
     df.to_csv(args.out, index=False, columns=["candidate_id", "rank", "score", "reasoning"])
     

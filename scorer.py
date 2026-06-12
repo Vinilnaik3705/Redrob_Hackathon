@@ -70,11 +70,81 @@ JD_REQUIRED_SKILLS = {
 }
 
 
+# Disqualified patterns for current title to eliminate unrelated applications
+DISQUALIFIED_TITLE_PATTERNS = [
+    r'\bdevops\b', r'\bsre\b', r'\bsite reliability\b',
+    r'\bfrontend\b', r'\bfront-end\b', r'\bfront end\b',
+    r'\bbackend developer\b', r'\bback-end developer\b',
+    r'\bfull.?stack\b',
+    r'\bproject manager\b', r'\bprogram manager\b',
+    r'\bhr manager\b', r'\bhuman resources\b',
+    r'\bmarketing manager\b', r'\bsales\b',
+    r'\bmechanical engineer\b', r'\bcivil engineer\b',
+    r'\bbusiness analyst\b', r'\bdata analyst\b',  # NOT data scientist
+    r'\bcloud engineer\b', r'\bnetwork engineer\b',
+    r'\baccountant\b', r'\bfinance\b',
+]
+
 def clean_text(text: str) -> str:
     """Clean and normalize whitespaces in text."""
     if not text:
         return ""
     return re.sub(r'\s+', ' ', text).strip()
+
+def is_unrelated_role(candidate: dict) -> bool:
+    title = candidate.get('profile', {}).get('current_title', '').lower()
+    import re
+    for pattern in DISQUALIFIED_TITLE_PATTERNS:
+        if re.search(pattern, title):
+            return True
+            
+    # Also check if title has ZERO AI/ML signal AND no AI in career
+    AI_TITLE_SIGNALS = ['ml','ai','machine learning','data scientist','nlp',
+                        'search','ranking','recommendation','applied scientist',
+                        'research scientist','research engineer','scientist']
+    has_ai_title = any(sig in title for sig in AI_TITLE_SIGNALS)
+    
+    if not has_ai_title:
+        # Check career — if career also has no AI, disqualify
+        career = candidate.get('career_history', [])
+        career_titles = ' '.join(j.get('title','').lower() for j in career)
+        career_descs = ' '.join(j.get('description','').lower() for j in career)
+        combined = career_titles + ' ' + career_descs
+        has_ai_career = any(sig in combined for sig in 
+                           ['machine learning','deep learning','nlp','neural','embedding',
+                            'vector','retrieval','ranking','recommendation','pytorch',
+                            'tensorflow','transformer','llm','bert','gpt'])
+        if not has_ai_career:
+            return True
+            
+    return False
+
+def get_active_days(signals: dict):
+    # Try both field names
+    days = signals.get('last_active_days_ago')
+    if days is not None:
+        return int(days)
+        
+    date_str = signals.get('last_active_date', '')
+    if date_str:
+        try:
+            today = datetime(2026, 6, 7)
+            return (today - datetime.strptime(date_str, "%Y-%m-%d")).days
+        except:
+            pass
+    return None  # Unknown
+
+def is_closed_source_only(candidate: dict) -> bool:
+    profile = candidate.get('profile', {})
+    yoe = profile.get('years_of_experience', 0.0)
+    signals = candidate.get('redrob_signals', {})
+    github = signals.get('github_activity_score', None)
+    
+    # Only flag if EXPLICITLY zero AND high YOE
+    # None = field missing = unknown = do NOT penalize
+    if yoe >= 7.0 and github is not None and float(github) == 0.0:
+        return True
+    return False
 
 def check_honeypots(c: dict) -> bool:
     """Evaluate 7 honeypot rules to trap fake/impossible candidates."""
@@ -148,17 +218,13 @@ def check_honeypots(c: dict) -> bool:
 def check_disqualifications(c: dict) -> bool:
     """Verify core eligibility and qualification rules."""
     profile = c.get("profile", {})
-    title = profile.get("current_title", "").lower().strip()
     country = profile.get("country", "").lower().strip()
     loc = profile.get("location", "").lower().strip()
     yoe = profile.get("years_of_experience", 0.0)
     signals = c.get("redrob_signals", {})
-    last_active = signals.get("last_active_date", "")
     
-    # Rule 8 - Unrelated Title
-    if title in DISQUALIFIED_EXACT_TITLES:
-        return True
-    if re.search(r'\bsales\b', title) and "salesforce" not in title:
+    # Bug 4 - Unrelated Title
+    if is_unrelated_role(c):
         return True
         
     # Rule 9 - Outside India
@@ -166,14 +232,9 @@ def check_disqualifications(c: dict) -> bool:
         return True
         
     # Rule 10 - Inactive > 12 Months
-    if last_active:
-        try:
-            today = datetime(2026, 6, 7)
-            active_date = datetime.strptime(last_active, "%Y-%m-%d")
-            if (today - active_date).days > 365:
-                return True
-        except:
-            pass
+    active_days = get_active_days(signals)
+    if active_days is not None and active_days > 365:
+        return True
             
     # Rule 11 - YOE Hard Minimum
     if yoe < 3.0:
@@ -223,24 +284,18 @@ def score_production_deployment(c: dict) -> float:
 def score_behavioral_availability(c: dict) -> float:
     """Evaluate candidate response rates, activity, and notice periods."""
     signals = c.get("redrob_signals", {})
-    last_active = signals.get("last_active_date", "")
+    days = get_active_days(signals)
     
     last_active_score = 0.0
-    if last_active:
-        try:
-            today = datetime(2026, 6, 7)
-            active_date = datetime.strptime(last_active, "%Y-%m-%d")
-            days = (today - active_date).days
-            if days <= 7:
-                last_active_score = 1.0
-            elif days <= 30:
-                last_active_score = 0.75
-            elif days <= 90:
-                last_active_score = 0.45
-            elif days <= 180:
-                last_active_score = 0.15
-        except:
-            pass
+    if days is not None:
+        if days <= 7:
+            last_active_score = 1.0
+        elif days <= 30:
+            last_active_score = 0.75
+        elif days <= 90:
+            last_active_score = 0.45
+        elif days <= 180:
+            last_active_score = 0.15
             
     open_to_work_score = 0.3 if signals.get("open_to_work_flag", False) else 0.0
     response_rate_score = float(signals.get("recruiter_response_rate", 0.0))
@@ -437,7 +492,7 @@ def calculate_penalties(c: dict) -> float:
         penalties += 0.12
         
     # 7. Closed-source only
-    if yoe >= 5.0 and github_score == -1:
+    if is_closed_source_only(c):
         penalties += 0.08
         
     # 8. CV/Speech/Robotics primary (no NLP/IR evidence)

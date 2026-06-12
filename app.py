@@ -68,7 +68,7 @@ st.sidebar.write("Configure the ranking system options below.")
 candidate_limit = st.sidebar.slider(
     "Number of Candidates to Output",
     min_value=10,
-    max_value=200,
+    max_value=500,
     value=100,
     step=10,
     help="Select the maximum number of ranked candidates to return in the CSV output."
