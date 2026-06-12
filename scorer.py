@@ -376,23 +376,21 @@ def is_langchain_only(c: dict) -> bool:
     return False
 
 def is_research_only(career_history: list) -> bool:
-    """Identify pure researchers without any deployment experience."""
+    """Identify researchers without any deployment experience."""
     if not career_history:
         return False
-    research_titles = ["research scientist", "research engineer", "research intern", "phd student", "postdoc", "research fellow", "ml researcher", "ai researcher"]
-    all_research = True
-    has_production_signal = False
-    production_keywords = ["production", "deployed", "shipped", "launched", "real users", "serving", "inference"]
+    research_titles = ["research scientist", "research engineer", "research intern", "phd student", "postdoc", "research fellow", "ml researcher", "ai researcher", "scientist"]
+    has_research_title = any(any(rt in job.get("title", "").lower() for rt in research_titles) for job in career_history)
     
+    production_keywords = ["production", "deployed", "shipped", "launched", "real users", "serving", "inference"]
+    has_production_signal = False
     for job in career_history:
         title = job.get("title", "").lower()
         desc = job.get("description", "").lower()
-        if not any(rt in title for rt in research_titles):
-            all_research = False
         if any(pk in desc or pk in title for pk in production_keywords):
             has_production_signal = True
             
-    return all_research and not has_production_signal
+    return has_research_title and not has_production_signal
 
 def calculate_penalties(c: dict) -> float:
     """Calculate the total additive penalties for a candidate."""

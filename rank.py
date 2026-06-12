@@ -44,9 +44,26 @@ def generate_reasoning(candidate, score, rank):
         if comp and comp not in all_companies:
             all_companies.append(comp)
             
-    # Determine company type based on presence of product companies in career history
-    has_product_role = any(not is_consulting(job.get("company", ""), job.get("industry", "")) for job in candidate.get("career_history", []))
-    company_type = "product company" if has_product_role else "services firm"
+    # Categorize company background to distinguish product, services, and mixed backgrounds
+    product_companies = []
+    cons_companies = []
+    for job in candidate.get("career_history", []):
+        comp = job.get("company", "")
+        ind = job.get("industry", "")
+        if comp:
+            if is_consulting(comp, ind):
+                if comp not in cons_companies:
+                    cons_companies.append(comp)
+            else:
+                if comp not in product_companies:
+                    product_companies.append(comp)
+                    
+    if not product_companies and cons_companies:
+        company_type = "services firm"
+    elif product_companies and cons_companies:
+        company_type = "mixed background"
+    else:
+        company_type = "product company"
     
     company_detail = f"at {company_type}"
     if all_companies:
