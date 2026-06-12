@@ -104,6 +104,7 @@ def main():
     parser.add_argument("--candidates", required=True, help="Path to candidates json/jsonl file.")
     parser.add_argument("--out", required=True, help="Path to write the submission CSV.")
     parser.add_argument("--jd", required=False, help="Custom Job Description query text.")
+    parser.add_argument("--limit", type=int, default=100, help="Number of top candidates to rank.")
     args = parser.parse_args()
     
     jd_query = args.jd if args.jd else JD_QUERY
@@ -235,7 +236,7 @@ def main():
                     
         # Sort and rank (tie-break: score desc, then candidate_id asc)
         scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
-        top_100_items = scored_candidates[:min(100, len(scored_candidates))]
+        top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
     else:
         print("Computing features and embeddings dynamically (fallback)...")
         model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
@@ -333,11 +334,11 @@ def main():
                     })
                     
         scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
-        top_100_items = scored_candidates[:min(100, len(scored_candidates))]
+        top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
             
-    # Output top 100 to CSV
+    # Output top items to CSV
     rows = []
-    for rank_idx, item in enumerate(top_100_items):
+    for rank_idx, item in enumerate(top_items):
         rank = rank_idx + 1
         cid = item["candidate_id"]
         score = item["score"]

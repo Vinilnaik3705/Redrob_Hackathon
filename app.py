@@ -64,7 +64,15 @@ DEFAULT_JD = (
 
 # Sidebar configuration
 st.sidebar.header("Configuration")
-st.sidebar.write("Upload your candidate dataset in the main panel to begin.")
+st.sidebar.write("Configure the ranking system options below.")
+candidate_limit = st.sidebar.slider(
+    "Number of Candidates to Output",
+    min_value=10,
+    max_value=200,
+    value=100,
+    step=10,
+    help="Select the maximum number of ranked candidates to return in the CSV output."
+)
 
 # Main layout split
 col1, col2 = st.columns([1.5, 1])
@@ -116,7 +124,8 @@ if uploaded_file is not None:
                     "python", "rank.py",
                     "--candidates", temp_input_path,
                     "--out", temp_output_path,
-                    "--jd", jd_query
+                    "--jd", jd_query,
+                    "--limit", str(candidate_limit)
                 ]
                 
                 result = subprocess.run(cmd, capture_output=True, text=True)
