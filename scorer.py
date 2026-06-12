@@ -179,6 +179,10 @@ def check_disqualifications(c: dict) -> bool:
     if yoe < 3.0:
         return True
         
+    # Rule 12 - Pure Research Scientist without production experience
+    if is_research_only(c.get("career_history", [])):
+        return True
+        
     return False
 
 # ============================================================================
@@ -426,9 +430,13 @@ def calculate_penalties(c: dict) -> float:
     elif notice_days > 90:
         penalties += 0.12
         
-    # 6. Pure consulting career
-    if career_history and all(any(cons in job.get("company", "").lower() for cons in CONSULTING_COMPANIES) for job in career_history):
-        penalties += 0.20
+    # 6. Consulting career penalty
+    has_consulting = any(any(cons in job.get("company", "").lower() for cons in CONSULTING_COMPANIES) for job in career_history)
+    all_consulting = career_history and all(any(cons in job.get("company", "").lower() for cons in CONSULTING_COMPANIES) for job in career_history)
+    if all_consulting:
+        penalties += 0.25
+    elif has_consulting:
+        penalties += 0.12
         
     # 7. Closed-source only
     if yoe >= 5.0 and github_score == -1:

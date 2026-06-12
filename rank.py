@@ -37,19 +37,20 @@ def generate_reasoning(candidate, score, rank):
     yoe = profile.get("years_of_experience", 0.0)
     title = profile.get("current_title", "Engineer")
     
-    # Extract product companies
-    product_companies = []
+    # Extract all companies for reasoning to ensure factual correctness
+    all_companies = []
     for job in candidate.get("career_history", []):
         comp = job.get("company", "")
-        ind = job.get("industry", "")
-        if comp and not is_consulting(comp, ind):
-            if comp not in product_companies:
-                product_companies.append(comp)
-                
-    company_type = "product company" if product_companies else "services firm"
+        if comp and comp not in all_companies:
+            all_companies.append(comp)
+            
+    # Determine company type based on presence of product companies in career history
+    has_product_role = any(not is_consulting(job.get("company", ""), job.get("industry", "")) for job in candidate.get("career_history", []))
+    company_type = "product company" if has_product_role else "services firm"
+    
     company_detail = f"at {company_type}"
-    if product_companies:
-        company_detail += f" ({', '.join(product_companies[:2])})"
+    if all_companies:
+        company_detail += f" ({', '.join(all_companies[:2])})"
     
     # Skills matching
     skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
@@ -216,6 +217,8 @@ def main():
                 # Override Hard Cap if zero retrieval evidence
                 if retrieval_score == 0.0:
                     final_score = min(0.25, final_score)
+                    # Deduct a tiny offset to keep zero-retrieval scores unique and untied
+                    final_score -= (1.0 - semantic_score) * 0.01
                     
                 scored_candidates.append({
                     "candidate_id": candidates[orig_idx]["candidate_id"],
@@ -316,6 +319,8 @@ def main():
                 
                 if retrieval_score == 0.0:
                     final_score = min(0.25, final_score)
+                    # Deduct a tiny offset to keep zero-retrieval scores unique and untied
+                    final_score -= (1.0 - semantic_score) * 0.01
                     
                 scored_candidates.append({
                     "candidate_id": c["candidate_id"],
