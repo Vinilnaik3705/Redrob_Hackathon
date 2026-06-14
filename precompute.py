@@ -7,7 +7,8 @@ from scorer import (
     check_honeypots, check_disqualifications, clean_text,
     score_career_retrieval, score_production_deployment,
     score_behavioral_availability, score_skill_match,
-    score_rules_context, score_yoe, calculate_penalties
+    score_rules_context, score_yoe, calculate_penalties,
+    score_assessment, score_career_trajectory
 )
 
 candidates_path = "candidates.jsonl"
@@ -73,6 +74,8 @@ with open(candidates_path, "r", encoding="utf-8") as f:
         rules_score = score_rules_context(c)
         yoe_score = score_yoe(yoe)
         penalties_total = calculate_penalties(c)
+        assessment_score = score_assessment(c)
+        trajectory_score = score_career_trajectory(c)
         
         candidate_ids.append(cid)
         features.append([
@@ -82,7 +85,9 @@ with open(candidates_path, "r", encoding="utf-8") as f:
             behavioral_score, 
             rules_score, 
             yoe_score, 
-            penalties_total
+            penalties_total,
+            assessment_score,
+            trajectory_score
         ])
         honeypots.append(is_bad)
         

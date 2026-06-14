@@ -4,7 +4,33 @@ import os
 import sys
 import numpy as np
 import pandas as pd
-import faiss
+try:
+    import faiss
+except ImportError:
+    class NumPyFaissFlatIP:
+        def __init__(self, dimension):
+            self.dimension = dimension
+            self.embeddings = None
+        def add(self, embeddings):
+            self.embeddings = embeddings
+        def search(self, query_vector, k):
+            # query_vector is shape (1, dimension), embeddings is shape (N, dimension)
+            similarities = np.dot(self.embeddings, query_vector.T).flatten()
+            top_k_indices = np.argsort(-similarities)[:k]
+            top_k_distances = similarities[top_k_indices]
+            return np.array([top_k_distances]), np.array([top_k_indices])
+
+    class FaissFallback:
+        IndexFlatIP = NumPyFaissFlatIP
+        @staticmethod
+        def normalize_L2(embeddings):
+            # Normalize in-place
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            norms = np.where(norms == 0, 1e-10, norms)
+            # Use in-place division
+            np.divide(embeddings, norms, out=embeddings)
+
+    faiss = FaissFallback()
 import torch
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
@@ -13,7 +39,8 @@ from scorer import (
     score_career_retrieval, score_production_deployment,
     score_behavioral_availability, score_skill_match,
     score_rules_context, score_yoe, calculate_penalties,
-    is_consulting, JD_REQUIRED_SKILLS
+    is_consulting, JD_REQUIRED_SKILLS, score_assessment,
+    score_career_trajectory
 )
 
 # Fixed Job Description Query
@@ -26,6 +53,29 @@ JD_QUERY = (
     "Startup product company experience. Located in India (Noida, Pune, Hyderabad, Bangalore, Mumbai, Delhi NCR)."
 )
 
+def normalize_dimensions(candidate_data):
+    """Per-dimension min-max normalization across the scored candidate pool.
+
+    After FAISS pre-filtering, each scoring dimension clusters in a narrow
+    sub-range (e.g. semantic similarity 0.7-0.9 for all top-3000). Without
+    normalization, the configured weight 0.30 only contributes ~0.06 of actual
+    spread instead of 0.30. Normalizing each dimension to [0,1] across the pool
+    ensures every weight reflects its intended discriminative contribution,
+    producing natural score spread from real profile differences.
+    """
+    dims = ['semantic', 'retrieval', 'production', 'skill', 'rules', 'assessment', 'trajectory']
+    for dim in dims:
+        values = [cd[dim] for cd in candidate_data]
+        dmin = min(values)
+        dmax = max(values)
+        if dmax > dmin:
+            for cd in candidate_data:
+                cd[f'{dim}_norm'] = (cd[dim] - dmin) / (dmax - dmin)
+        else:
+            for cd in candidate_data:
+                cd[f'{dim}_norm'] = 0.5  # All identical — neutral
+    return candidate_data
+
 def generate_reasoning(candidate, score, rank):
     profile = candidate.get("profile", {})
     signals = candidate.get("redrob_signals", {})
@@ -35,52 +85,58 @@ def generate_reasoning(candidate, score, rank):
     title = profile.get("current_title", "Engineer")
     notice = signals.get("notice_period_days", 180)
     
-    # ALWAYS use ACTUAL companies from career_history — never filter
-    # Show top 2 actual companies regardless of type
-    all_companies = []
+    # 1. Career path arrow (oldest to newest)
+    companies = []
     seen = set()
-    for job in career:
+    for job in reversed(career):
         comp = job.get("company", "").strip()
         if comp and comp not in seen:
-            all_companies.append(comp)
+            companies.append(comp)
             seen.add(comp)
-            
-    # Classify background honestly
-    consulting_names = {
-        "tcs", "tata consultancy", "infosys", "wipro", "accenture",
-        "cognizant", "capgemini", "tech mahindra", "hcl", "hcltech",
-        "deloitte", "kpmg", "ey", "ernst", "pwc", "mindtree",
-        "mu sigma", "fractal analytics", "mphasis", "hexaware", "ltimindtree"
-    }
     
-    def is_consulting_company(name):
-        return any(c in name.lower() for c in consulting_names)
-        
-    product_cos = [c for c in all_companies if not is_consulting_company(c)]
-    consulting_cos = [c for c in all_companies if is_consulting_company(c)]
-    
-    # Honest background label
-    if not consulting_cos:
-        background = "product company"
-    elif not product_cos:
-        background = "services firm"
+    if len(companies) > 3:
+        companies_show = [companies[0], companies[-2], companies[-1]]
     else:
-        background = "mixed background"  # Has both — be honest
-        
-    # Show actual companies (top 2) — NEVER substitute or filter
-    display_companies = all_companies[:2]
-    company_detail = f"at {background} ({', '.join(display_companies)})" if display_companies else f"at {background}"
+        companies_show = companies
     
-    # Skills — only from actual skills[] array
+    if companies_show:
+        career_path = " > ".join(companies_show)
+    else:
+        career_path = "No previous company listed"
+        
+    # 2. Location
+    location_str = profile.get("location", "India").split(",")[0].strip()
+    if not location_str:
+        location_str = "India"
+
+    # 3. Skills
     skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
     matched = [s for s in skills_list if s.lower() in JD_REQUIRED_SKILLS]
     if matched:
-        skills_str = f"expertise in {', '.join(matched[:3])}"
+        skills_str = ", ".join(matched[:3])
     else:
-        # Fall back to top actual skills — never invent
-        skills_str = f"skills including {', '.join(skills_list[:3])}" if skills_list else "general ML skills"
+        skills_str = ", ".join(skills_list[:3]) if skills_list else "general ML skills"
         
-    # Availability — from actual signals
+    # 4. Gaps
+    career_text = " ".join([j.get("description", "").lower() + " " + j.get("title", "").lower() for j in career])
+    skills_lower = [s.lower() for s in skills_list]
+    combined_context = (career_text + " " + " ".join(skills_lower)).lower()
+    
+    gaps = []
+    if not any(kw in combined_context for kw in ["ranking", "rerank", "ndcg", "mrr", "map", "eval"]):
+        gaps.append("ranking/eval")
+    if not any(kw in combined_context for kw in ["faiss", "pinecone", "weaviate", "qdrant", "milvus", "vector"]):
+        gaps.append("vector DBs")
+    if not any(kw in combined_context for kw in ["sentence-transformers", "bge", "e5", "embedding"]):
+        gaps.append("embeddings")
+    if not any(kw in combined_context for kw in ["lora", "qlora", "peft", "llm", "fine-tuning"]):
+        gaps.append("LLM fine-tuning")
+    if not any(kw in combined_context for kw in ["production", "deployed", "shipped", "serving", "inference"]):
+        gaps.append("production depth")
+        
+    gaps_str = f" Gaps: {', '.join(gaps)}." if gaps else ""
+
+    # 5. Availability/Notice
     last_active = signals.get("last_active_date", "")
     active_days_ago = None
     if last_active:
@@ -94,62 +150,58 @@ def generate_reasoning(candidate, score, rank):
         if active_days_ago <= 30:
             availability = "recently active"
         elif active_days_ago <= 90:
-            availability = f"active {active_days_ago} days ago"
-        elif active_days_ago <= 180:
-            availability = f"last active {active_days_ago} days ago"
+            availability = f"active {active_days_ago}d ago"
         else:
-            availability = "inactive for 6+ months"
+            availability = f"inactive {active_days_ago}d"
     else:
         last_days = signals.get("last_active_days_ago")
         if last_days is not None:
             if last_days <= 30:
                 availability = "recently active"
             elif last_days <= 90:
-                availability = f"active {last_days} days ago"
+                availability = f"active {last_days}d ago"
             else:
-                availability = f"inactive {last_days} days"
+                availability = f"inactive {last_days}d"
         else:
             availability = "activity unknown"
-            
-    # Honest concerns — pull from actual data
-    concerns = []
-    if notice > 90:
-        concerns.append(f"long notice period ({notice}d)")
-    if "research" in title.lower() and not any(
-        kw in " ".join(j.get("description","") for j in career).lower()
-        for kw in ["production","deployed","shipped","scale"]
-    ):
-        concerns.append("research-focused background — production depth unclear")
-    if consulting_cos and not product_cos:
-        concerns.append("consulting-only background")
-    if yoe > 12:
-        concerns.append("senior tenure — verify active coding role")
-    if yoe < 4:
-        concerns.append("below ideal experience range")
-        
-    concern_str = f" Concern: {'; '.join(concerns[:2])}." if concerns else ""
-    
-    # Build reasoning with UNIQUE elements per candidate
-    if rank <= 10:
-        reasoning = (
-            f"{yoe:.1f}-year {title} {company_detail}. "
-            f"Strong {skills_str}; {availability}, notice {notice}d.{concern_str}"
-        )
-    elif rank <= 30:
-        reasoning = (
-            f"{yoe:.1f}-year {title} {company_detail}. "
-            f"Relevant {skills_str}; {availability}, {notice}d notice.{concern_str}"
-        )
-    elif rank <= 60:
-        reasoning = (
-            f"{title} ({yoe:.1f}yr) {company_detail}. "
-            f"{skills_str.capitalize()}; {availability}.{concern_str}"
-        )
+
+    # 6. Confidence Level
+    completeness = signals.get("profile_completeness_score", 50)
+    has_verified = signals.get("verified_email", False) or signals.get("verified_phone", False) or signals.get("linkedin_connected", False)
+    if completeness >= 80 and has_verified:
+        confidence = "HIGH"
+    elif completeness >= 50:
+        confidence = "MEDIUM"
     else:
-        reasoning = (
-            f"{yoe:.1f}-year {title} {company_detail}. "
-            f"{skills_str.capitalize()}; {notice}d notice, {availability}.{concern_str}"
-        )
+        confidence = "LOW"
+
+    # 7. Risk Factor
+    risks = []
+    tenures = [j.get("duration_months", 24) for j in career[:3] if j.get("duration_months") is not None]
+    if tenures:
+        avg_tenure = sum(tenures) / len(tenures)
+        if avg_tenure < 15:
+            risks.append("job hopping")
+    offer_rate = signals.get("offer_acceptance_rate", -1)
+    if 0 <= offer_rate < 0.4:
+        risks.append("low offer acceptance")
+    if notice > 90:
+        risks.append("long notice")
+    
+    risk_level = "LOW"
+    if len(risks) >= 2:
+        risk_level = "HIGH"
+    elif len(risks) == 1:
+        risk_level = "MEDIUM"
+        
+    risk_str = f" [Risk: {risk_level}]" if risks else ""
+
+    # Build reasoning
+    reasoning = (
+        f"{title} ({career_path}), {yoe:.1f}yrs; strong in {skills_str}. "
+        f"{availability.capitalize()}, {notice}d notice, {location_str}.{gaps_str} "
+        f"[Confidence: {confidence}]{risk_str}"
+    )
         
     return reasoning
 
@@ -175,6 +227,16 @@ def make_unique_reasonings(rows):
             row['reasoning'] = base + extra
         seen[base] = True
     return rows
+
+def get_candidate_text(c):
+    profile = c.get("profile", {})
+    headline = profile.get("headline", "")
+    summary = profile.get("summary", "")
+    career_texts = []
+    for job in c.get("career_history", []):
+        career_texts.append(f"{job.get('title', '')} at {job.get('company', '')}: {job.get('description', '')}")
+    skills_str = " ".join([s.get("name", "") for s in c.get("skills", [])])
+    return clean_text(f"{headline} {summary} {' '.join(career_texts)} {skills_str}")
 
 def main():
     parser = argparse.ArgumentParser(description="Rank candidates for Senior AI Engineer.")
@@ -262,51 +324,101 @@ def main():
             k = min(3000, len(survivor_indices))
             D, I = index.search(jd_vector, k)
             
-            # I[0] contains indices in survivor_embeddings, D[0] contains similarity scores
-            for j in range(k):
-                surv_idx = I[0][j]
+            # TF-IDF Recall Supplement
+            print("Computing TF-IDF similarities for hybrid retrieval...")
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            survivor_candidates = [candidates[idx] for idx in survivor_indices]
+            corpus = [get_candidate_text(c) for c in survivor_candidates]
+            
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(corpus)
+            jd_tfidf = vectorizer.transform([jd_query])
+            tfidf_similarities = (tfidf_matrix * jd_tfidf.T).toarray().flatten()
+            
+            # Top 500 keyword matches
+            top_tfidf_local_indices = np.argsort(-tfidf_similarities)[:min(500, len(survivor_indices))]
+            
+            # Union of FAISS and TF-IDF matches
+            faiss_local_indices = set(I[0])
+            tfidf_local_indices = set(top_tfidf_local_indices)
+            union_local_indices = list(faiss_local_indices.union(tfidf_local_indices))
+            print(f"Union matches: {len(union_local_indices)} (FAISS: {len(faiss_local_indices)}, TF-IDF: {len(tfidf_local_indices)})")
+            
+            # Pass 1: Collect all dimension scores for hybrid recall pool
+            candidate_data = []
+            for surv_idx in union_local_indices:
                 orig_idx = survivor_indices[surv_idx]
-                semantic_score = float(D[0][j])
+                
+                # If was in FAISS, we already have semantic score, else compute L2 inner product
+                if surv_idx in faiss_local_indices:
+                    rank_in_faiss = np.where(I[0] == surv_idx)[0][0]
+                    semantic_score = float(D[0][rank_in_faiss])
+                else:
+                    semantic_score = float(np.dot(survivor_embeddings[surv_idx], jd_vector.flatten()))
                 
                 # Load precomputed features
                 feat = pre_features[orig_idx]
-                retrieval_score = float(feat[0])
-                production_score = float(feat[1])
-                skill_score = float(feat[2])
-                behavioral_score = float(feat[3])
-                rules_score = float(feat[4])
-                yoe_score = float(feat[5])
-                penalties_total = float(feat[6])
                 
-                # Combine score
-                final_score = (
-                    0.30 * semantic_score +
-                    0.25 * retrieval_score +
-                    0.20 * production_score +
-                    0.15 * behavioral_score +
-                    0.07 * skill_score +
-                    0.03 * rules_score -
-                    penalties_total
+                # Safe precomputed or live calculation for new features
+                if len(feat) > 8:
+                    assessment_val = float(feat[7])
+                    trajectory_val = float(feat[8])
+                else:
+                    assessment_val = score_assessment(candidates[orig_idx])
+                    trajectory_val = score_career_trajectory(candidates[orig_idx])
+                
+                candidate_data.append({
+                    'orig_idx': orig_idx,
+                    'semantic': semantic_score,
+                    'retrieval': float(feat[0]),
+                    'production': float(feat[1]),
+                    'skill': float(feat[2]),
+                    'behavioral': float(feat[3]),  # raw behavioral for multiplier
+                    'rules': float(feat[4]),
+                    'yoe': float(feat[5]),
+                    'penalties': float(feat[6]),
+                    'assessment': assessment_val,
+                    'trajectory': trajectory_val,
+                })
+            
+            # Per-dimension normalization for natural score spread
+            # NOTE: behavioral is NOT normalized — it's used as a multiplier
+            candidate_data = normalize_dimensions(candidate_data)
+            
+            # Pass 2: Combine scores with behavioral as MULTIPLIER
+            for cd in candidate_data:
+                # Technical core score (additive, without behavioral)
+                technical_score = (
+                    0.28 * cd['semantic_norm'] +
+                    0.22 * cd['retrieval_norm'] +
+                    0.18 * cd['production_norm'] +
+                    0.12 * cd['skill_norm'] +
+                    0.08 * cd['trajectory_norm'] +
+                    0.07 * cd['assessment_norm'] +
+                    0.05 * cd['rules_norm']
                 )
+                
+                # Behavioral as MULTIPLIER (range 0.25 to 1.0)
+                behavioral_mult = 0.25 + 0.75 * cd['behavioral']
+                
+                final_score = technical_score * behavioral_mult - cd['penalties']
                 final_score = max(0.0, final_score)
                 
-                # Override Hard Cap if zero retrieval evidence with graduated penalty
-                if retrieval_score == 0.0:
-                    # Semantic score still counts but heavily discounted
-                    base = semantic_score * 0.25  # max 0.25 for zero retrieval
+                # Hard cap uses RAW retrieval score (not normalized)
+                if cd['retrieval'] == 0.0:
+                    base = cd['semantic_norm'] * 0.25
                     final_score = max(0.0, base)
-                elif retrieval_score < 0.3:
-                    # Weak retrieval — partial discount
-                    multiplier = 0.5 + (retrieval_score / 0.3) * 0.3  # 0.5 to 0.8
+                elif cd['retrieval'] < 0.3:
+                    multiplier = 0.5 + (cd['retrieval'] / 0.3) * 0.3
                     final_score = final_score * multiplier
-                    
+                
                 scored_candidates.append({
-                    "candidate_id": candidates[orig_idx]["candidate_id"],
+                    "candidate_id": candidates[cd['orig_idx']]["candidate_id"],
                     "score": final_score,
-                    "candidate": candidates[orig_idx]
+                    "candidate": candidates[cd['orig_idx']]
                 })
                 
-            # Add all other candidates (disqualified + non-top 3000 survivors) with 0.0 score
+            # Add all other candidates (disqualified + non-top survivors) with 0.0 score
             scored_ids = {x["candidate_id"] for x in scored_candidates}
             for idx in range(len(candidates)):
                 cid = candidates[idx]["candidate_id"]
@@ -348,15 +460,7 @@ def main():
             # Build texts for survivors
             texts = []
             for c in survivors:
-                profile = c.get("profile", {})
-                headline = profile.get("headline", "")
-                summary = profile.get("summary", "")
-                career_texts = []
-                for job in c.get("career_history", []):
-                    career_texts.append(f"{job.get('title', '')} at {job.get('company', '')}: {job.get('description', '')}")
-                skills_str = " ".join([s.get("name", "") for s in c.get("skills", [])])
-                full_text = clean_text(f"{headline} {summary} {' '.join(career_texts)} {skills_str}")
-                texts.append(full_text)
+                texts.append(get_candidate_text(c))
                 
             print("Embedding survivors...")
             surv_embeddings = model.encode(texts, batch_size=256, convert_to_numpy=True).astype(np.float32)
@@ -375,43 +479,93 @@ def main():
             k = min(3000, len(survivors))
             D, I = index.search(jd_vector, k)
             
-            for j in range(k):
-                surv_idx = I[0][j]
+            # TF-IDF Recall Supplement
+            print("Computing TF-IDF similarities for hybrid retrieval (fallback)...")
+            from sklearn.feature_extraction.text import TfidfVectorizer
+            vectorizer = TfidfVectorizer(stop_words='english')
+            tfidf_matrix = vectorizer.fit_transform(texts)
+            jd_tfidf = vectorizer.transform([jd_query])
+            tfidf_similarities = (tfidf_matrix * jd_tfidf.T).toarray().flatten()
+            
+            # Top 500 keyword matches
+            top_tfidf_local_indices = np.argsort(-tfidf_similarities)[:min(500, len(survivors))]
+            
+            # Union of FAISS and TF-IDF matches
+            faiss_local_indices = set(I[0])
+            tfidf_local_indices = set(top_tfidf_local_indices)
+            union_local_indices = list(faiss_local_indices.union(tfidf_local_indices))
+            print(f"Union matches (fallback): {len(union_local_indices)} (FAISS: {len(faiss_local_indices)}, TF-IDF: {len(tfidf_local_indices)})")
+            
+            # Pass 1: Collect all dimension scores for hybrid recall pool
+            candidate_data = []
+            for surv_idx in union_local_indices:
                 c = survivors[surv_idx]
-                semantic_score = float(D[0][j])
+                
+                # If was in FAISS, we already have semantic score, else compute L2 inner product
+                if surv_idx in faiss_local_indices:
+                    rank_in_faiss = np.where(I[0] == surv_idx)[0][0]
+                    semantic_score = float(D[0][rank_in_faiss])
+                else:
+                    semantic_score = float(np.dot(surv_embeddings[surv_idx], jd_vector.flatten()))
                 
                 # Dynamic feature extraction
                 retrieval_score = score_career_retrieval(c)
                 production_score = score_production_deployment(c)
                 skill_score = score_skill_match(c)
                 behavioral_score = score_behavioral_availability(c)
-                rules_score = score_rules_context(c)
+                rules_score_val = score_rules_context(c)
                 penalties_total = calculate_penalties(c)
+                assessment_val = score_assessment(c)
+                trajectory_val = score_career_trajectory(c)
                 
-                final_score = (
-                    0.30 * semantic_score +
-                    0.25 * retrieval_score +
-                    0.20 * production_score +
-                    0.15 * behavioral_score +
-                    0.07 * skill_score +
-                    0.03 * rules_score -
-                    penalties_total
+                candidate_data.append({
+                    'candidate': c,
+                    'semantic': semantic_score,
+                    'retrieval': retrieval_score,
+                    'production': production_score,
+                    'skill': skill_score,
+                    'behavioral': behavioral_score,  # raw for multiplier
+                    'rules': rules_score_val,
+                    'penalties': penalties_total,
+                    'assessment': assessment_val,
+                    'trajectory': trajectory_val,
+                })
+            
+            # Per-dimension normalization for natural score spread
+            # NOTE: behavioral is NOT normalized — it's used as a multiplier
+            candidate_data = normalize_dimensions(candidate_data)
+            
+            # Pass 2: Combine scores with behavioral as MULTIPLIER
+            for cd in candidate_data:
+                # Technical core score (additive, without behavioral)
+                technical_score = (
+                    0.28 * cd['semantic_norm'] +
+                    0.22 * cd['retrieval_norm'] +
+                    0.18 * cd['production_norm'] +
+                    0.12 * cd['skill_norm'] +
+                    0.08 * cd['trajectory_norm'] +
+                    0.07 * cd['assessment_norm'] +
+                    0.05 * cd['rules_norm']
                 )
+                
+                # Behavioral as MULTIPLIER (range 0.25 to 1.0)
+                behavioral_mult = 0.25 + 0.75 * cd['behavioral']
+                
+                final_score = technical_score * behavioral_mult - cd['penalties']
                 final_score = max(0.0, final_score)
                 
-                if retrieval_score == 0.0:
-                    # Semantic score still counts but heavily discounted
-                    base = semantic_score * 0.25  # max 0.25 for zero retrieval
+                # Hard cap uses RAW retrieval score (not normalized)
+                if cd['retrieval'] == 0.0:
+                    base = cd['semantic_norm'] * 0.25
                     final_score = max(0.0, base)
-                elif retrieval_score < 0.3:
-                    # Weak retrieval — partial discount
-                    multiplier = 0.5 + (retrieval_score / 0.3) * 0.3  # 0.5 to 0.8
+                elif cd['retrieval'] < 0.3:
+                    multiplier = 0.5 + (cd['retrieval'] / 0.3) * 0.3
                     final_score = final_score * multiplier
-                    
+                
                 scored_candidates.append({
-                    "candidate_id": c["candidate_id"],
+                    "candidate_id": cd['candidate']["candidate_id"],
                     "score": final_score,
-                    "candidate": c
+                    "candidate": cd['candidate']
                 })
                 
             # Add all other candidates (disqualified + non-top 3000 survivors) with 0.0 score
