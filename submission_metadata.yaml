@@ -12,7 +12,7 @@ team_members:
 
 github_repo: "https://github.com/Vinilnaik3705/Redrob_Hackathon"
 
-sandbox_link: "https://huggingface.co/spaces/Vinil05/Intelligent_Candidate_Ranker"
+sandbox_link: "https://autoranker.streamlit.app/"
 
 reproduce_command: "python rank.py --candidates ./candidates.jsonl --out ./submission.csv"
 
