@@ -8,7 +8,11 @@ primary_contact:
 team_members:
   - name: "Vinil Naik"
     email: "vinilnaikdharavath3705@gmail.com"
-    role: "ML Engineer"          
+    role: "Student"      
+
+  - name: "G Prasanjeeth Reddy"
+    email: "gpr5425056@gmail.com"
+    role: "Student"
 
 github_repo: "https://github.com/Vinilnaik3705/Redrob_Hackathon"
 
