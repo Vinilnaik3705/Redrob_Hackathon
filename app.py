@@ -561,21 +561,25 @@ if st.session_state['results_df'] is not None:
         
         with graph_col1:
             st.markdown("#### Score Distribution")
-            score_counts = df['score'].round(2)
-            st.bar_chart(score_counts.value_counts().sort_index())
+            score_data = df['score'].round(2).value_counts().sort_index().reset_index()
+            score_data.columns = ['Score', 'Count']
+            st.bar_chart(score_data, x='Score', y='Count')
             
             st.markdown("#### Experience Level Distribution (YOE)")
-            yoe_counts = df['yoe'].round(0)
-            st.bar_chart(yoe_counts.value_counts().sort_index())
+            yoe_data = df['yoe'].round(0).value_counts().sort_index().reset_index()
+            yoe_data.columns = ['YOE', 'Count']
+            st.bar_chart(yoe_data, x='YOE', y='Count')
             
         with graph_col2:
             st.markdown("#### Notice Period Breakdown (Days)")
-            notice_counts = df['notice_period']
-            st.bar_chart(notice_counts.value_counts().sort_index())
+            notice_data = df['notice_period'].value_counts().sort_index().reset_index()
+            notice_data.columns = ['Notice Period (Days)', 'Count']
+            st.bar_chart(notice_data, x='Notice Period (Days)', y='Count')
             
             st.markdown("#### Location Analysis")
-            loc_counts = df['location'].apply(lambda x: x.split(',')[0].strip() if isinstance(x, str) else 'India')
-            st.bar_chart(loc_counts.value_counts().head(10))
+            loc_data = df['location'].apply(lambda x: x.split(',')[0].strip() if isinstance(x, str) else 'India').value_counts().head(10).reset_index()
+            loc_data.columns = ['Location', 'Count']
+            st.bar_chart(loc_data, x='Location', y='Count')
             
     # --- TAB 4: COMPARE CANDIDATES ---
     with tab_compare:
