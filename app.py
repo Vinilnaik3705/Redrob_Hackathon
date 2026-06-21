@@ -223,15 +223,17 @@ if uploaded_file is not None:
             
             status_box.write("2. Running ranking engine subprocess (embeddings, rules, and cross-encoder)...")
             
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            rank_script = os.path.join(app_dir, "rank.py")
             cmd = [
-                "python", "rank.py",
+                "python", rank_script,
                 "--candidates", temp_input_path,
                 "--out", temp_output_path,
                 "--jd", jd_query,
                 "--limit", str(candidate_limit)
             ]
             
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, cwd=app_dir)
             
             if result.returncode == 0:
                 status_box.write("3. Ranking completed successfully.")
