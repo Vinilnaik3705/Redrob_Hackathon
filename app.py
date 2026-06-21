@@ -227,10 +227,11 @@ if uploaded_file is not None:
             
             status_box.write("2. Running ranking engine subprocess (embeddings, rules, and cross-encoder)...")
             
+            import sys
             app_dir = os.path.dirname(os.path.abspath(__file__))
             rank_script = os.path.join(app_dir, "rank.py")
             cmd = [
-                "python", rank_script,
+                sys.executable, rank_script,
                 "--candidates", temp_input_path,
                 "--out", temp_output_path,
                 "--jd", jd_query,
@@ -249,7 +250,12 @@ if uploaded_file is not None:
             else:
                 status_box.update(label="Ranking failed!", state="error")
                 st.error("Error executing ranking pipeline:")
-                st.code(result.stderr)
+                if result.stderr:
+                    st.markdown("### Stderr Output:")
+                    st.code(result.stderr)
+                if result.stdout:
+                    st.markdown("### Stdout Output:")
+                    st.code(result.stdout)
 
 # Display Results & Interactive Features if available
 if st.session_state['results_df'] is not None:
