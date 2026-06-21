@@ -1,19 +1,8 @@
----
-title: Intelligent Candidate Ranker
-emoji: 🎖️
-colorFrom: blue
-colorTo: indigo
-sdk: streamlit
-sdk_version: 1.35.0
-python_version: 3.11
-app_file: app.py
-pinned: false
----
-
 # Team The Gladiators
 
 **Intelligent Candidate Ranking System**  
-*India Runs Hackathon 2026 · Redrob AI · Track 1: Data & AI Challenge*
+*India Runs Hackathon 2026 · Redrob AI · Track 1: Data & AI Challenge*  
+🚀 **Live Streamlit App:** [autoranker.streamlit.app](https://autoranker.streamlit.app/)
 
 ---
 
