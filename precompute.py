@@ -37,10 +37,14 @@ print("Streaming candidates.jsonl and precomputing features...")
 count = 0
 
 with open(candidates_path, "r", encoding="utf-8") as f:
-    for line in f:
+    for line_idx, line in enumerate(f):
         if not line.strip():
             continue
-        c = json.loads(line)
+        try:
+            c = json.loads(line)
+        except json.JSONDecodeError as e:
+            print(f"Warning: Skipped invalid JSON line {line_idx+1}: {e}")
+            continue
         
         cid = c["candidate_id"]
         profile = c.get("profile", {})
@@ -100,6 +104,12 @@ print(f"Total candidates processed: {count}")
 print("Batch encoding texts with SentenceTransformer (batch_size=256)...")
 embeddings = model.encode(texts, batch_size=256, show_progress_bar=True, convert_to_numpy=True)
 
+print("Building BM25 index...")
+from rank_bm25 import BM25Okapi
+import pickle
+tokenized_corpus = [text.lower().split() for text in texts]
+bm25 = BM25Okapi(tokenized_corpus)
+
 print("Saving precomputed data to disk...")
 np.save(os.path.join(out_dir, "embeddings.npy"), embeddings)
 np.save(os.path.join(out_dir, "features.npy"), np.array(features, dtype=np.float32))
@@ -107,5 +117,8 @@ np.save(os.path.join(out_dir, "honeypots.npy"), np.array(honeypots, dtype=bool))
 
 with open(os.path.join(out_dir, "ids.json"), "w", encoding="utf-8") as out_f:
     json.dump(candidate_ids, out_f)
+
+with open(os.path.join(out_dir, "bm25_index.pkl"), "wb") as f:
+    pickle.dump({"bm25": bm25, "tokenized_corpus": tokenized_corpus}, f)
 
 print("Precomputation finished successfully.")

@@ -32,6 +32,9 @@ except ImportError:
 
     faiss = FaissFallback()
 import torch
+import pickle
+from rank_bm25 import BM25Okapi
+from sentence_transformers import CrossEncoder
 from datetime import datetime
 from sentence_transformers import SentenceTransformer
 from scorer import (
@@ -43,6 +46,18 @@ from scorer import (
     score_career_trajectory
 )
 
+def reciprocal_rank_fusion(rank_lists, k=60):
+    """
+    rank_lists: list of ranked candidate index lists (best first)
+    Returns: fused ranking as list of (index, fused_score) sorted descending
+    """
+    scores = {}
+    for ranks in rank_lists:
+        for position, idx in enumerate(ranks):
+            scores[idx] = scores.get(idx, 0) + 1.0 / (k + position + 1)
+    return sorted(scores.items(), key=lambda x: -x[1])
+
+
 # Fixed Job Description Query
 JD_QUERY = (
     "Senior AI Engineer with production experience in embeddings-based retrieval systems "
@@ -52,6 +67,29 @@ JD_QUERY = (
     "LLM fine-tuning (LoRA, QLoRA, PEFT), learning-to-rank. "
     "Startup product company experience. Located in India (Noida, Pune, Hyderabad, Bangalore, Mumbai, Delhi NCR)."
 )
+
+def calculate_rule_strength(candidate, semantic_score=None):
+    """
+    A pure rule-based 'ideal candidate' score, independent of any 
+    retrieval/reranking model. Used as a floor/anchor signal.
+    """
+    p = candidate.get('profile', {})
+    sig = candidate.get('redrob_signals', {})
+    career = candidate.get('career_history', [])
+    career_text = ' '.join(j.get('description','')+' '+j.get('title','') for j in career).lower()
+    
+    yoe = p.get('years_of_experience', 0)
+    notice = sig.get('notice_period_days', 180)
+    ret_count = sum(1 for kw in ['ranking','retrieval','recommendation','search','embedding','vector'] if kw in career_text)
+    prod_count = sum(1 for kw in ['production','deployed','shipped','scale','serving'] if kw in career_text)
+    
+    strength = 0
+    if 6 <= yoe <= 8: strength += 3
+    if ret_count >= 3: strength += 3
+    if prod_count >= 2: strength += 3
+    if notice <= 15: strength += 2
+    
+    return strength  # max 11
 
 def normalize_dimensions(candidate_data):
     """Per-dimension min-max normalization across the scored candidate pool.
@@ -257,9 +295,12 @@ def main():
             candidates = json.load(f)
     else:
         with open(args.candidates, "r", encoding="utf-8") as f:
-            for line in f:
+            for line_idx, line in enumerate(f):
                 if line.strip():
-                    candidates.append(json.loads(line))
+                    try:
+                        candidates.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        print(f"Warning: Skipped invalid JSON line {line_idx+1}: {e}")
                     
     print(f"Loaded {len(candidates)} candidates.")
     
@@ -315,46 +356,35 @@ def main():
             faiss.normalize_L2(survivor_embeddings)
             faiss.normalize_L2(jd_vector)
             
-            # FAISS Index
-            dimension = 384
-            index = faiss.IndexFlatIP(dimension)
-            index.add(survivor_embeddings)
+            # Semantic (dense) scores for survivors
+            semantic_scores = np.dot(survivor_embeddings, jd_vector.flatten())
             
-            # Search top 3000 semantic matches
-            k = min(3000, len(survivor_indices))
-            D, I = index.search(jd_vector, k)
+            # Load precomputed BM25 index
+            bm25_path = os.path.join(base_dir, "bm25_index.pkl")
+            if not os.path.exists(bm25_path):
+                print(f"Error: {bm25_path} not found. Please run precompute.py first.")
+                sys.exit(1)
+            with open(bm25_path, "rb") as f:
+                bm25_data = pickle.load(f)
             
-            # TF-IDF Recall Supplement
-            print("Computing TF-IDF similarities for hybrid retrieval...")
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            survivor_candidates = [candidates[idx] for idx in survivor_indices]
-            corpus = [get_candidate_text(c) for c in survivor_candidates]
+            jd_tokens = jd_query.lower().split()
+            bm25_scores = bm25_data["bm25"].get_scores(jd_tokens)
             
-            vectorizer = TfidfVectorizer(stop_words='english')
-            tfidf_matrix = vectorizer.fit_transform(corpus)
-            jd_tfidf = vectorizer.transform([jd_query])
-            tfidf_similarities = (tfidf_matrix * jd_tfidf.T).toarray().flatten()
+            # Build rank lists on survivors (index order relative to survivor_indices, best first)
+            dense_rank = sorted(range(len(survivor_indices)), key=lambda i: -semantic_scores[i])
+            bm25_rank = sorted(range(len(survivor_indices)), key=lambda i: -bm25_scores[survivor_indices[i]])
             
-            # Top 500 keyword matches
-            top_tfidf_local_indices = np.argsort(-tfidf_similarities)[:min(500, len(survivor_indices))]
-            
-            # Union of FAISS and TF-IDF matches
-            faiss_local_indices = set(I[0])
-            tfidf_local_indices = set(top_tfidf_local_indices)
-            union_local_indices = list(faiss_local_indices.union(tfidf_local_indices))
-            print(f"Union matches: {len(union_local_indices)} (FAISS: {len(faiss_local_indices)}, TF-IDF: {len(tfidf_local_indices)})")
+            # Fusion
+            fused = reciprocal_rank_fusion([dense_rank, bm25_rank])
+            # top 2000 survivor-local indices
+            shortlist_surv_indices = [idx for idx, _ in fused[:2000]]
+            print(f"Shortlisted top {len(shortlist_surv_indices)} candidates using RRF fusion.")
             
             # Pass 1: Collect all dimension scores for hybrid recall pool
             candidate_data = []
-            for surv_idx in union_local_indices:
+            for surv_idx in shortlist_surv_indices:
                 orig_idx = survivor_indices[surv_idx]
-                
-                # If was in FAISS, we already have semantic score, else compute L2 inner product
-                if surv_idx in faiss_local_indices:
-                    rank_in_faiss = np.where(I[0] == surv_idx)[0][0]
-                    semantic_score = float(D[0][rank_in_faiss])
-                else:
-                    semantic_score = float(np.dot(survivor_embeddings[surv_idx], jd_vector.flatten()))
+                semantic_score = float(semantic_scores[surv_idx])
                 
                 # Load precomputed features
                 feat = pre_features[orig_idx]
@@ -418,6 +448,30 @@ def main():
                     "candidate": candidates[cd['orig_idx']]
                 })
                 
+            # Perform Cross-Encoder reranking on top 500 candidates
+            scored_candidates.sort(key=lambda x: -x["score"])
+            top_500 = scored_candidates[:500]
+            
+            # Build (JD, candidate_text) pairs for cross-encoder
+            pairs = [(jd_query, get_candidate_text(item["candidate"])) for item in top_500]
+            
+            print("Reranking top 500 candidates with Cross-Encoder on CPU...")
+            cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cpu')
+            cross_scores = cross_encoder.predict(pairs)
+            
+            # Normalize cross_scores to 0-1 range first
+            s_min = min(cross_scores)
+            s_max = max(cross_scores)
+            if s_max > s_min:
+                normalized_cross = [(s - s_min) / (s_max - s_min) for s in cross_scores]
+            else:
+                normalized_cross = [0.5] * len(cross_scores)
+                
+            # Blend cross-encoder score into final score
+            for i, item in enumerate(top_500):
+                blended_score = 0.3 * normalized_cross[i] + 0.7 * item["score"]
+                item["score"] = blended_score
+            
             # Add all other candidates (disqualified + non-top survivors) with 0.0 score
             scored_ids = {x["candidate_id"] for x in scored_candidates}
             for idx in range(len(candidates)):
@@ -431,8 +485,12 @@ def main():
                     
         # Filter out zero-score candidates first
         scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
-        # Sort and rank (tie-break: score desc, then candidate_id asc)
-        scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+        # Sort and rank (tie-break: score desc, then rule_strength desc, then candidate_id asc)
+        scored_candidates.sort(key=lambda x: (
+            -round(x["score"], 4), 
+            -calculate_rule_strength(x["candidate"], None), 
+            x["candidate_id"]
+        ))
         top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
     else:
         print("Computing features and embeddings dynamically (fallback)...")
@@ -472,41 +530,31 @@ def main():
             faiss.normalize_L2(surv_embeddings)
             faiss.normalize_L2(jd_vector)
             
-            dimension = 384
-            index = faiss.IndexFlatIP(dimension)
-            index.add(surv_embeddings)
+            # Semantic (dense) scores for survivors
+            semantic_scores = np.dot(surv_embeddings, jd_vector.flatten())
             
-            k = min(3000, len(survivors))
-            D, I = index.search(jd_vector, k)
+            print("Building BM25 index dynamically (fallback)...")
+            tokenized_corpus = [text.lower().split() for text in texts]
+            bm25 = BM25Okapi(tokenized_corpus)
             
-            # TF-IDF Recall Supplement
-            print("Computing TF-IDF similarities for hybrid retrieval (fallback)...")
-            from sklearn.feature_extraction.text import TfidfVectorizer
-            vectorizer = TfidfVectorizer(stop_words='english')
-            tfidf_matrix = vectorizer.fit_transform(texts)
-            jd_tfidf = vectorizer.transform([jd_query])
-            tfidf_similarities = (tfidf_matrix * jd_tfidf.T).toarray().flatten()
+            jd_tokens = jd_query.lower().split()
+            bm25_scores = bm25.get_scores(jd_tokens)
             
-            # Top 500 keyword matches
-            top_tfidf_local_indices = np.argsort(-tfidf_similarities)[:min(500, len(survivors))]
+            # Build rank lists on survivors (index order relative to survivors, best first)
+            dense_rank = sorted(range(len(survivors)), key=lambda i: -semantic_scores[i])
+            bm25_rank = sorted(range(len(survivors)), key=lambda i: -bm25_scores[i])
             
-            # Union of FAISS and TF-IDF matches
-            faiss_local_indices = set(I[0])
-            tfidf_local_indices = set(top_tfidf_local_indices)
-            union_local_indices = list(faiss_local_indices.union(tfidf_local_indices))
-            print(f"Union matches (fallback): {len(union_local_indices)} (FAISS: {len(faiss_local_indices)}, TF-IDF: {len(tfidf_local_indices)})")
+            # Fusion
+            fused = reciprocal_rank_fusion([dense_rank, bm25_rank])
+            # top 2000 survivor-local indices
+            shortlist_surv_indices = [idx for idx, _ in fused[:2000]]
+            print(f"Shortlisted top {len(shortlist_surv_indices)} candidates using RRF fusion.")
             
             # Pass 1: Collect all dimension scores for hybrid recall pool
             candidate_data = []
-            for surv_idx in union_local_indices:
+            for surv_idx in shortlist_surv_indices:
                 c = survivors[surv_idx]
-                
-                # If was in FAISS, we already have semantic score, else compute L2 inner product
-                if surv_idx in faiss_local_indices:
-                    rank_in_faiss = np.where(I[0] == surv_idx)[0][0]
-                    semantic_score = float(D[0][rank_in_faiss])
-                else:
-                    semantic_score = float(np.dot(surv_embeddings[surv_idx], jd_vector.flatten()))
+                semantic_score = float(semantic_scores[surv_idx])
                 
                 # Dynamic feature extraction
                 retrieval_score = score_career_retrieval(c)
@@ -520,6 +568,7 @@ def main():
                 
                 candidate_data.append({
                     'candidate': c,
+                    'orig_idx': survivor_orig_indices[surv_idx],
                     'semantic': semantic_score,
                     'retrieval': retrieval_score,
                     'production': production_score,
@@ -568,7 +617,31 @@ def main():
                     "candidate": cd['candidate']
                 })
                 
-            # Add all other candidates (disqualified + non-top 3000 survivors) with 0.0 score
+            # Perform Cross-Encoder reranking on top 500 candidates
+            scored_candidates.sort(key=lambda x: -x["score"])
+            top_500 = scored_candidates[:500]
+            
+            # Build (JD, candidate_text) pairs for cross-encoder
+            pairs = [(jd_query, get_candidate_text(item["candidate"])) for item in top_500]
+            
+            print("Reranking top 500 candidates with Cross-Encoder on CPU...")
+            cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cpu')
+            cross_scores = cross_encoder.predict(pairs)
+            
+            # Normalize cross_scores to 0-1 range first
+            s_min = min(cross_scores)
+            s_max = max(cross_scores)
+            if s_max > s_min:
+                normalized_cross = [(s - s_min) / (s_max - s_min) for s in cross_scores]
+            else:
+                normalized_cross = [0.5] * len(cross_scores)
+                
+            # Blend cross-encoder score into final score
+            for i, item in enumerate(top_500):
+                blended_score = 0.3 * normalized_cross[i] + 0.7 * item["score"]
+                item["score"] = blended_score
+            
+            # Add all other candidates (disqualified + non-top survivors) with 0.0 score
             scored_ids = {x["candidate_id"] for x in scored_candidates}
             for c in candidates:
                 if c["candidate_id"] not in scored_ids:
@@ -579,7 +652,12 @@ def main():
                     })
                     
         scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
-        scored_candidates.sort(key=lambda x: (-round(x["score"], 4), x["candidate_id"]))
+        # Sort and rank (tie-break: score desc, then rule_strength desc, then candidate_id asc)
+        scored_candidates.sort(key=lambda x: (
+            -round(x["score"], 4), 
+            -calculate_rule_strength(x["candidate"], None), 
+            x["candidate_id"]
+        ))
         top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
             
     # Output top items to CSV
@@ -605,7 +683,6 @@ def main():
             
     df = pd.DataFrame(rows)
     df.to_csv(args.out, index=False, columns=["candidate_id", "rank", "score", "reasoning"])
-    
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     print(f"Ranking completed in {duration:.2f} seconds. Output saved to {args.out}")

@@ -688,10 +688,13 @@ def calculate_penalties(c: dict) -> float:
             
     if primary_title_is_cv and not has_nlp_ir:
         penalties += 0.10
-        
     # 9. Over-experience penalty (12+ years of experience is too senior for the JD)
     if yoe > 12.0:
         penalties += 0.18
+        
+    # 10. Software Engineer or Developer in current title penalty
+    if any(term in title for term in ["software engineer", "developer", "sde", "programmer"]):
+        penalties += 0.15
         
     return penalties
 
