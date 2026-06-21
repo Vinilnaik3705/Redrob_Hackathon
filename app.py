@@ -48,10 +48,14 @@ st.markdown("""
         border: 1px solid #E5E7EB;
         margin-bottom: 15px;
         transition: transform 0.2s, box-shadow 0.2s;
+        color: #1F2937 !important;
     }
     .premium-card:hover {
         transform: translateY(-2px);
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.08);
+    }
+    .premium-card p, .premium-card h3, .premium-card h4, .premium-card li, .premium-card b, .premium-card span {
+        color: #1F2937 !important;
     }
     
     /* Badges */
@@ -271,6 +275,42 @@ if st.session_state['results_df'] is not None:
             df.at[idx, 'willing_to_relocate'] = "Yes" if sig.get('willing_to_relocate', False) else "No"
             df.at[idx, 'skills_count'] = len(cand.get('skills', []))
             
+    # Identify disqualified candidates
+    ranked_ids = set(df['candidate_id'].tolist())
+    disqualified_candidates = []
+    
+    from scorer import check_honeypots, is_unrelated_role, is_research_only, get_active_days
+    
+    for cid, cand in details.items():
+        if cid not in ranked_ids:
+            p = cand.get('profile', {})
+            sig = cand.get('redrob_signals', {})
+            
+            # Diagnose reason
+            if check_honeypots(cand):
+                reason = "Disqualified: Honeypot Trap (Fake Profile/Timelines)"
+            elif is_unrelated_role(cand):
+                reason = f"Disqualified: Unrelated Role ('{p.get('current_title', 'Unknown')}')"
+            elif p.get('country', '').lower().strip() != 'india' and 'india' not in p.get('location', '').lower():
+                reason = f"Disqualified: Location Outside India ('{p.get('location', 'Unknown')}')"
+            elif get_active_days(sig) is not None and get_active_days(sig) > 365:
+                reason = f"Disqualified: Inactive > 12 Months ({get_active_days(sig)} days)"
+            elif p.get('years_of_experience', 0.0) < 3.0:
+                reason = f"Disqualified: YOE < 3.0 ({p.get('years_of_experience', 0.0)} yrs)"
+            elif is_research_only(cand.get('career_history', [])):
+                reason = "Disqualified: Pure Research (No production deployment)"
+            else:
+                reason = "Filtered out: Low semantic/technical match score (0.0)"
+                
+            disqualified_candidates.append({
+                "candidate_id": cid,
+                "name": p.get('anonymized_name', cid),
+                "title": p.get('current_title', 'Unknown Title'),
+                "yoe": p.get('years_of_experience', 0.0),
+                "location": p.get('location', 'India'),
+                "reason": reason
+            })
+            
     # Setup interactive tabs
     tab_leaderboard, tab_explorer, tab_analytics, tab_compare = st.tabs([
         "🏆 Ranked Leaderboard", 
@@ -281,64 +321,95 @@ if st.session_state['results_df'] is not None:
     
     # --- TAB 1: RANKED LEADERBOARD ---
     with tab_leaderboard:
-        st.subheader("Top Ranked Candidates")
+        st.subheader("Leaderboard Results")
         
-        # Summary metrics
-        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
-        with stat_col1:
-            st.markdown(f"<div class='stat-container'><h3>{len(df)}</h3><p style='margin:0;color:#6B7280;'>Total Shortlisted</p></div>", unsafe_allow_html=True)
-        with stat_col2:
-            st.markdown(f"<div class='stat-container'><h3>{df['score'].max():.4f}</h3><p style='margin:0;color:#6B7280;'>Highest Score</p></div>", unsafe_allow_html=True)
-        with stat_col3:
-            st.markdown(f"<div class='stat-container'><h3>{df['score'].min():.4f}</h3><p style='margin:0;color:#6B7280;'>Lowest Score</p></div>", unsafe_allow_html=True)
-        with stat_col4:
-            st.markdown(f"<div class='stat-container'><h3>{df['yoe'].mean():.1f} yrs</h3><p style='margin:0;color:#6B7280;'>Average YOE</p></div>", unsafe_allow_html=True)
+        # Sub-tabs for Shortlisted vs Disqualified
+        sub_tab_shortlist, sub_tab_disqualified = st.tabs(["🏆 Shortlisted Candidates", "🚫 Disqualified / Filtered Candidates"])
+        
+        with sub_tab_shortlist:
+            # Summary metrics
+            stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+            with stat_col1:
+                st.markdown(f"<div class='stat-container'><h3>{len(df)}</h3><p style='margin:0;color:#6B7280;'>Total Shortlisted</p></div>", unsafe_allow_html=True)
+            with stat_col2:
+                max_score = df['score'].max() if len(df) > 0 else 0.0
+                st.markdown(f"<div class='stat-container'><h3>{max_score:.4f}</h3><p style='margin:0;color:#6B7280;'>Highest Score</p></div>", unsafe_allow_html=True)
+            with stat_col3:
+                min_score = df['score'].min() if len(df) > 0 else 0.0
+                st.markdown(f"<div class='stat-container'><h3>{min_score:.4f}</h3><p style='margin:0;color:#6B7280;'>Lowest Score</p></div>", unsafe_allow_html=True)
+            with stat_col4:
+                avg_yoe = df['yoe'].mean() if len(df) > 0 else 0.0
+                st.markdown(f"<div class='stat-container'><h3>{avg_yoe:.1f} yrs</h3><p style='margin:0;color:#6B7280;'>Average YOE</p></div>", unsafe_allow_html=True)
+                
+            st.write("")
             
-        st.write("")
-        
-        # Download and Sidebar filters for Table view
-        dl_col, filter_col = st.columns([1, 3])
-        with dl_col:
-            csv_data = st.session_state['results_df'].to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Download submission.csv",
-                data=csv_data,
-                file_name="team_The_Gladiators.csv",
-                mime="text/csv"
+            # Download and Sidebar filters for Table view
+            dl_col, filter_col = st.columns([1, 3])
+            with dl_col:
+                csv_data = st.session_state['results_df'].to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="Download submission.csv",
+                    data=csv_data,
+                    file_name="team_The_Gladiators.csv",
+                    mime="text/csv"
+                )
+                
+            # Table filters
+            st.markdown("### Filter Candidates List")
+            f_col1, f_col2, f_col3 = st.columns(3)
+            with f_col1:
+                min_yoe_filter = st.slider("Minimum YOE", min_value=3.0, max_value=15.0, value=3.0, step=0.5)
+            with f_col2:
+                max_notice_filter = st.selectbox("Max Notice Period (Days)", options=[180, 90, 60, 30, 15, 0], index=0)
+            with f_col3:
+                relocate_only = st.checkbox("Willing to Relocate Only", value=False)
+                
+            # Apply filters
+            if len(df) > 0:
+                filtered_df = df[df['yoe'] >= min_yoe_filter]
+                filtered_df = filtered_df[filtered_df['notice_period'] <= max_notice_filter]
+                if relocate_only:
+                    filtered_df = filtered_df[filtered_df['willing_to_relocate'] == "Yes"]
+            else:
+                filtered_df = df
+                
+            st.dataframe(
+                filtered_df[['rank', 'candidate_id', 'name', 'title', 'yoe', 'location', 'notice_period', 'score', 'reasoning']],
+                column_config={
+                    "rank": st.column_config.NumberColumn("Rank", format="%d"),
+                    "candidate_id": "ID",
+                    "name": "Candidate Name",
+                    "title": "Current Title",
+                    "yoe": st.column_config.NumberColumn("YOE", format="%.1f"),
+                    "location": "Location",
+                    "notice_period": st.column_config.NumberColumn("Notice (Days)", format="%d"),
+                    "score": st.column_config.NumberColumn("Match Score", format="%.4f"),
+                    "reasoning": st.column_config.TextColumn("Summary / Fit Notes", width="large")
+                },
+                hide_index=True,
+                use_container_width=True
             )
             
-        # Table filters
-        st.markdown("### Filter Candidates List")
-        f_col1, f_col2, f_col3 = st.columns(3)
-        with f_col1:
-            min_yoe_filter = st.slider("Minimum YOE", min_value=3.0, max_value=15.0, value=3.0, step=0.5)
-        with f_col2:
-            max_notice_filter = st.selectbox("Max Notice Period (Days)", options=[180, 90, 60, 30, 15, 0], index=0)
-        with f_col3:
-            relocate_only = st.checkbox("Willing to Relocate Only", value=False)
-            
-        # Apply filters
-        filtered_df = df[df['yoe'] >= min_yoe_filter]
-        filtered_df = filtered_df[filtered_df['notice_period'] <= max_notice_filter]
-        if relocate_only:
-            filtered_df = filtered_df[filtered_df['willing_to_relocate'] == "Yes"]
-            
-        st.dataframe(
-            filtered_df[['rank', 'candidate_id', 'name', 'title', 'yoe', 'location', 'notice_period', 'score', 'reasoning']],
-            column_config={
-                "rank": st.column_config.NumberColumn("Rank", format="%d"),
-                "candidate_id": "ID",
-                "name": "Candidate Name",
-                "title": "Current Title",
-                "yoe": st.column_config.NumberColumn("YOE", format="%.1f"),
-                "location": "Location",
-                "notice_period": st.column_config.NumberColumn("Notice (Days)", format="%d"),
-                "score": st.column_config.NumberColumn("Match Score", format="%.4f"),
-                "reasoning": st.column_config.TextColumn("Summary / Fit Notes", width="large")
-            },
-            hide_index=True,
-            use_container_width=True
-        )
+        with sub_tab_disqualified:
+            st.markdown("### Disqualified & Filtered Candidates")
+            st.markdown("These candidates did not make the leaderboard. Below is the Stage 1 Hard Filter / Honeypot diagnosis:")
+            if disqualified_candidates:
+                dis_df = pd.DataFrame(disqualified_candidates)
+                st.dataframe(
+                    dis_df,
+                    column_config={
+                        "candidate_id": "ID",
+                        "name": "Candidate Name",
+                        "title": "Current Title",
+                        "yoe": st.column_config.NumberColumn("YOE", format="%.1f"),
+                        "location": "Location",
+                        "reason": st.column_config.TextColumn("Disqualification Reason", width="large")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+            else:
+                st.success("No candidates were disqualified in this run!")
         
     # --- TAB 2: PROFILE EXPLORER ---
     with tab_explorer:
