@@ -89,6 +89,18 @@ st.markdown("""
         border-radius: 12px;
         text-align: center;
     }
+    .stat-container h3 {
+        color: #1E3A8A !important;
+        margin: 0 0 5px 0 !important;
+        font-size: 2.2rem !important;
+        font-weight: 700 !important;
+    }
+    .stat-container p {
+        color: #4B5563 !important;
+        margin: 0 !important;
+        font-size: 0.95rem !important;
+        font-weight: 600 !important;
+    }
     
     /* Button layout */
     .stButton>button {
