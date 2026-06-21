@@ -125,13 +125,7 @@ python precompute.py
 ### 1. Generate ranked output
 
 ```bash
-python rank.py --candidates ./candidates.jsonl --out ./team_the_gladiators.csv
-```
-
-### 2. Validate your submission
-
-```bash
-python validate_submission.py "team_the_gladiators.csv"
+python rank.py --candidates ./candidates.jsonl --out ./submission.csv
 ```
 
 ---
@@ -140,15 +134,14 @@ python validate_submission.py "team_the_gladiators.csv"
 
 ```
 redrob_hackathon/
+├── .streamlit/                 # Streamlit configuration directory
 ├── app.py                      # Streamlit recruitment dashboard & profile explorer
-├── jd_config.py                # JD constants: required skills, keywords, consulting companies, fictional companies
 ├── scorer.py                   # Core scoring logic, penalty functions, and honeypot detection
 ├── precompute.py               # Generates embeddings and extracts features (run once)
 ├── rank.py                     # Main entrypoint: load precomputed → FAISS pass → score → output CSV
-├── validate_submission.py      # Format validator (included for convenience)
 ├── requirements.txt            # Project dependencies with version bounds
 ├── submission_metadata.yaml    # Portal metadata matching details
-├── team_the gladiators.csv     # Final ranked top-100 submission CSV
+├── README.md                   # Project documentation and deployment instructions
 └── .gitignore                  # Correctly configured git ignore patterns
 ```
 
