@@ -15,7 +15,6 @@ candidates_path = "candidates.jsonl"
 out_dir = "."
 
 if not os.path.exists(candidates_path):
-    # Fallback to local Windows path
     candidates_path = r"c:\Users\VINIL NAIK\OneDrive\Desktop\[PUB] India_runs_data_and_ai_challenge\[PUB] India_runs_data_and_ai_challenge\India_runs_data_and_ai_challenge\candidates.jsonl"
 
 if not os.path.exists(candidates_path):
@@ -26,7 +25,6 @@ import torch
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Loading Sentence Transformer model (BAAI/bge-small-en-v1.5) on {device}...")
 model = SentenceTransformer('BAAI/bge-small-en-v1.5', device=device)
-
 
 candidate_ids = []
 texts = []
@@ -52,7 +50,6 @@ with open(candidates_path, "r", encoding="utf-8") as f:
         summary = profile.get("summary", "")
         yoe = profile.get("years_of_experience", 0.0)
         
-        # Build text representation for BGE embeddings
         career_texts = []
         for job in c.get("career_history", []):
             title = job.get("title", "")
@@ -67,10 +64,8 @@ with open(candidates_path, "r", encoding="utf-8") as f:
         full_text = clean_text(f"{headline} {summary} {career_history_str} {skills_str}")
         texts.append(full_text)
         
-        # Check honeypots & disqualifications
         is_bad = check_honeypots(c) or check_disqualifications(c)
         
-        # Precompute features
         retrieval_score = score_career_retrieval(c)
         production_score = score_production_deployment(c)
         skill_score = score_skill_match(c)

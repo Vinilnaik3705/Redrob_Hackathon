@@ -14,7 +14,6 @@ except ImportError:
         def add(self, embeddings):
             self.embeddings = embeddings
         def search(self, query_vector, k):
-            # query_vector is shape (1, dimension), embeddings is shape (N, dimension)
             similarities = np.dot(self.embeddings, query_vector.T).flatten()
             top_k_indices = np.argsort(-similarities)[:k]
             top_k_distances = similarities[top_k_indices]
@@ -24,10 +23,8 @@ except ImportError:
         IndexFlatIP = NumPyFaissFlatIP
         @staticmethod
         def normalize_L2(embeddings):
-            # Normalize in-place
             norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
             norms = np.where(norms == 0, 1e-10, norms)
-            # Use in-place division
             np.divide(embeddings, norms, out=embeddings)
 
     faiss = FaissFallback()
@@ -57,8 +54,6 @@ def reciprocal_rank_fusion(rank_lists, k=60):
             scores[idx] = scores.get(idx, 0) + 1.0 / (k + position + 1)
     return sorted(scores.items(), key=lambda x: -x[1])
 
-
-# Fixed Job Description Query
 JD_QUERY = (
     "Senior AI Engineer with production experience in embeddings-based retrieval systems "
     "(sentence-transformers, BGE, E5, OpenAI embeddings), vector databases and hybrid search "
@@ -89,7 +84,7 @@ def calculate_rule_strength(candidate, semantic_score=None):
     if prod_count >= 2: strength += 3
     if notice <= 15: strength += 2
     
-    return strength  # max 11
+    return strength
 
 def normalize_dimensions(candidate_data):
     """Per-dimension min-max normalization across the scored candidate pool.
@@ -111,7 +106,7 @@ def normalize_dimensions(candidate_data):
                 cd[f'{dim}_norm'] = (cd[dim] - dmin) / (dmax - dmin)
         else:
             for cd in candidate_data:
-                cd[f'{dim}_norm'] = 0.5  # All identical — neutral
+                cd[f'{dim}_norm'] = 0.5
     return candidate_data
 
 def generate_reasoning(candidate, score, rank):
@@ -123,7 +118,6 @@ def generate_reasoning(candidate, score, rank):
     title = profile.get("current_title", "Engineer")
     notice = signals.get("notice_period_days", 180)
     
-    # 1. Career path arrow (oldest to newest)
     companies = []
     seen = set()
     for job in reversed(career):
@@ -142,12 +136,10 @@ def generate_reasoning(candidate, score, rank):
     else:
         career_path = "No previous company listed"
         
-    # 2. Location
     location_str = profile.get("location", "India").split(",")[0].strip()
     if not location_str:
         location_str = "India"
 
-    # 3. Skills
     skills_list = [s.get("name", "") for s in candidate.get("skills", [])]
     matched = [s for s in skills_list if s.lower() in JD_REQUIRED_SKILLS]
     if matched:
@@ -155,7 +147,6 @@ def generate_reasoning(candidate, score, rank):
     else:
         skills_str = ", ".join(skills_list[:3]) if skills_list else "general ML skills"
         
-    # 4. Gaps
     career_text = " ".join([j.get("description", "").lower() + " " + j.get("title", "").lower() for j in career])
     skills_lower = [s.lower() for s in skills_list]
     combined_context = (career_text + " " + " ".join(skills_lower)).lower()
@@ -174,7 +165,6 @@ def generate_reasoning(candidate, score, rank):
         
     gaps_str = f" Gaps: {', '.join(gaps)}." if gaps else ""
 
-    # 5. Availability/Notice
     last_active = signals.get("last_active_date", "")
     active_days_ago = None
     if last_active:
@@ -203,7 +193,6 @@ def generate_reasoning(candidate, score, rank):
         else:
             availability = "activity unknown"
 
-    # 6. Confidence Level
     completeness = signals.get("profile_completeness_score", 50)
     has_verified = signals.get("verified_email", False) or signals.get("verified_phone", False) or signals.get("linkedin_connected", False)
     if completeness >= 80 and has_verified:
@@ -213,7 +202,6 @@ def generate_reasoning(candidate, score, rank):
     else:
         confidence = "LOW"
 
-    # 7. Risk Factor
     risks = []
     tenures = [j.get("duration_months", 24) for j in career[:3] if j.get("duration_months") is not None]
     if tenures:
@@ -234,7 +222,6 @@ def generate_reasoning(candidate, score, rank):
         
     risk_str = f" [Risk: {risk_level}]" if risks else ""
 
-    # Build reasoning
     reasoning = (
         f"{title} ({career_path}), {yoe:.1f}yrs; strong in {skills_str}. "
         f"{availability.capitalize()}, {notice}d notice, {location_str}.{gaps_str} "
@@ -332,7 +319,6 @@ def main():
         pre_features = np.load(features_path)
         pre_honeypots = np.load(honeypots_path)
         
-        # Build FAISS index of survivors (non-honeypot, non-disqualified)
         survivor_indices = np.where(~pre_honeypots)[0]
         
         scored_candidates = []
@@ -352,14 +338,11 @@ def main():
             jd_vector = model.encode([jd_query])[0].astype(np.float32)
             jd_vector = jd_vector.reshape(1, -1)
             
-            # Normalize embeddings for cosine similarity
             faiss.normalize_L2(survivor_embeddings)
             faiss.normalize_L2(jd_vector)
             
-            # Semantic (dense) scores for survivors
             semantic_scores = np.dot(survivor_embeddings, jd_vector.flatten())
             
-            # Load precomputed BM25 index
             bm25_path = os.path.join(base_dir, "bm25_index.pkl")
             if not os.path.exists(bm25_path):
                 print(f"Error: {bm25_path} not found. Please run precompute.py first.")
@@ -370,26 +353,20 @@ def main():
             jd_tokens = jd_query.lower().split()
             bm25_scores = bm25_data["bm25"].get_scores(jd_tokens)
             
-            # Build rank lists on survivors (index order relative to survivor_indices, best first)
             dense_rank = sorted(range(len(survivor_indices)), key=lambda i: -semantic_scores[i])
             bm25_rank = sorted(range(len(survivor_indices)), key=lambda i: -bm25_scores[survivor_indices[i]])
             
-            # Fusion
             fused = reciprocal_rank_fusion([dense_rank, bm25_rank])
-            # top 2000 survivor-local indices
             shortlist_surv_indices = [idx for idx, _ in fused[:2000]]
             print(f"Shortlisted top {len(shortlist_surv_indices)} candidates using RRF fusion.")
             
-            # Pass 1: Collect all dimension scores for hybrid recall pool
             candidate_data = []
             for surv_idx in shortlist_surv_indices:
                 orig_idx = survivor_indices[surv_idx]
                 semantic_score = float(semantic_scores[surv_idx])
                 
-                # Load precomputed features
                 feat = pre_features[orig_idx]
                 
-                # Safe precomputed or live calculation for new features
                 if len(feat) > 8:
                     assessment_val = float(feat[7])
                     trajectory_val = float(feat[8])
@@ -403,7 +380,7 @@ def main():
                     'retrieval': float(feat[0]),
                     'production': float(feat[1]),
                     'skill': float(feat[2]),
-                    'behavioral': float(feat[3]),  # raw behavioral for multiplier
+                    'behavioral': float(feat[3]),
                     'rules': float(feat[4]),
                     'yoe': float(feat[5]),
                     'penalties': float(feat[6]),
@@ -411,13 +388,9 @@ def main():
                     'trajectory': trajectory_val,
                 })
             
-            # Per-dimension normalization for natural score spread
-            # NOTE: behavioral is NOT normalized — it's used as a multiplier
             candidate_data = normalize_dimensions(candidate_data)
             
-            # Pass 2: Combine scores with behavioral as MULTIPLIER
             for cd in candidate_data:
-                # Technical core score (additive, without behavioral)
                 technical_score = (
                     0.28 * cd['semantic_norm'] +
                     0.22 * cd['retrieval_norm'] +
@@ -428,13 +401,11 @@ def main():
                     0.05 * cd['rules_norm']
                 )
                 
-                # Behavioral as MULTIPLIER (range 0.25 to 1.0)
                 behavioral_mult = 0.25 + 0.75 * cd['behavioral']
                 
                 final_score = technical_score * behavioral_mult - cd['penalties']
                 final_score = max(0.0, final_score)
                 
-                # Hard cap uses RAW retrieval score (not normalized)
                 if cd['retrieval'] == 0.0:
                     base = cd['semantic_norm'] * 0.25
                     final_score = max(0.0, base)
@@ -448,18 +419,15 @@ def main():
                     "candidate": candidates[cd['orig_idx']]
                 })
                 
-            # Perform Cross-Encoder reranking on top 500 candidates
             scored_candidates.sort(key=lambda x: -x["score"])
             top_500 = scored_candidates[:500]
             
-            # Build (JD, candidate_text) pairs for cross-encoder
             pairs = [(jd_query, get_candidate_text(item["candidate"])) for item in top_500]
             
             print("Reranking top 500 candidates with Cross-Encoder on CPU...")
             cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cpu')
             cross_scores = cross_encoder.predict(pairs)
             
-            # Normalize cross_scores to 0-1 range first
             s_min = min(cross_scores)
             s_max = max(cross_scores)
             if s_max > s_min:
@@ -467,12 +435,10 @@ def main():
             else:
                 normalized_cross = [0.5] * len(cross_scores)
                 
-            # Blend cross-encoder score into final score
             for i, item in enumerate(top_500):
                 blended_score = 0.3 * normalized_cross[i] + 0.7 * item["score"]
                 item["score"] = blended_score
             
-            # Add all other candidates (disqualified + non-top survivors) with 0.0 score
             scored_ids = {x["candidate_id"] for x in scored_candidates}
             for idx in range(len(candidates)):
                 cid = candidates[idx]["candidate_id"]
@@ -483,9 +449,7 @@ def main():
                         "candidate": candidates[idx]
                     })
                     
-        # Filter out zero-score candidates first
         scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
-        # Sort and rank (tie-break: score desc, then rule_strength desc, then candidate_id asc)
         scored_candidates.sort(key=lambda x: (
             -round(x["score"], 4), 
             -calculate_rule_strength(x["candidate"], None), 
@@ -496,7 +460,6 @@ def main():
         print("Computing features and embeddings dynamically (fallback)...")
         model = SentenceTransformer('BAAI/bge-small-en-v1.5', device='cuda' if torch.cuda.is_available() else 'cpu')
         
-        # Run hard knockouts
         survivors = []
         survivor_orig_indices = []
         for idx, c in enumerate(candidates):
@@ -515,7 +478,6 @@ def main():
                     "candidate": c
                 })
         else:
-            # Build texts for survivors
             texts = []
             for c in survivors:
                 texts.append(get_candidate_text(c))
@@ -530,7 +492,6 @@ def main():
             faiss.normalize_L2(surv_embeddings)
             faiss.normalize_L2(jd_vector)
             
-            # Semantic (dense) scores for survivors
             semantic_scores = np.dot(surv_embeddings, jd_vector.flatten())
             
             print("Building BM25 index dynamically (fallback)...")
@@ -540,23 +501,18 @@ def main():
             jd_tokens = jd_query.lower().split()
             bm25_scores = bm25.get_scores(jd_tokens)
             
-            # Build rank lists on survivors (index order relative to survivors, best first)
             dense_rank = sorted(range(len(survivors)), key=lambda i: -semantic_scores[i])
             bm25_rank = sorted(range(len(survivors)), key=lambda i: -bm25_scores[i])
             
-            # Fusion
             fused = reciprocal_rank_fusion([dense_rank, bm25_rank])
-            # top 2000 survivor-local indices
             shortlist_surv_indices = [idx for idx, _ in fused[:2000]]
             print(f"Shortlisted top {len(shortlist_surv_indices)} candidates using RRF fusion.")
             
-            # Pass 1: Collect all dimension scores for hybrid recall pool
             candidate_data = []
             for surv_idx in shortlist_surv_indices:
                 c = survivors[surv_idx]
                 semantic_score = float(semantic_scores[surv_idx])
                 
-                # Dynamic feature extraction
                 retrieval_score = score_career_retrieval(c)
                 production_score = score_production_deployment(c)
                 skill_score = score_skill_match(c)
@@ -573,20 +529,16 @@ def main():
                     'retrieval': retrieval_score,
                     'production': production_score,
                     'skill': skill_score,
-                    'behavioral': behavioral_score,  # raw for multiplier
+                    'behavioral': behavioral_score,
                     'rules': rules_score_val,
                     'penalties': penalties_total,
                     'assessment': assessment_val,
                     'trajectory': trajectory_val,
                 })
             
-            # Per-dimension normalization for natural score spread
-            # NOTE: behavioral is NOT normalized — it's used as a multiplier
             candidate_data = normalize_dimensions(candidate_data)
             
-            # Pass 2: Combine scores with behavioral as MULTIPLIER
             for cd in candidate_data:
-                # Technical core score (additive, without behavioral)
                 technical_score = (
                     0.28 * cd['semantic_norm'] +
                     0.22 * cd['retrieval_norm'] +
@@ -597,13 +549,11 @@ def main():
                     0.05 * cd['rules_norm']
                 )
                 
-                # Behavioral as MULTIPLIER (range 0.25 to 1.0)
                 behavioral_mult = 0.25 + 0.75 * cd['behavioral']
                 
                 final_score = technical_score * behavioral_mult - cd['penalties']
                 final_score = max(0.0, final_score)
                 
-                # Hard cap uses RAW retrieval score (not normalized)
                 if cd['retrieval'] == 0.0:
                     base = cd['semantic_norm'] * 0.25
                     final_score = max(0.0, base)
@@ -617,18 +567,15 @@ def main():
                     "candidate": cd['candidate']
                 })
                 
-            # Perform Cross-Encoder reranking on top 500 candidates
             scored_candidates.sort(key=lambda x: -x["score"])
             top_500 = scored_candidates[:500]
             
-            # Build (JD, candidate_text) pairs for cross-encoder
             pairs = [(jd_query, get_candidate_text(item["candidate"])) for item in top_500]
             
             print("Reranking top 500 candidates with Cross-Encoder on CPU...")
             cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2', device='cpu')
             cross_scores = cross_encoder.predict(pairs)
             
-            # Normalize cross_scores to 0-1 range first
             s_min = min(cross_scores)
             s_max = max(cross_scores)
             if s_max > s_min:
@@ -636,12 +583,10 @@ def main():
             else:
                 normalized_cross = [0.5] * len(cross_scores)
                 
-            # Blend cross-encoder score into final score
             for i, item in enumerate(top_500):
                 blended_score = 0.3 * normalized_cross[i] + 0.7 * item["score"]
                 item["score"] = blended_score
             
-            # Add all other candidates (disqualified + non-top survivors) with 0.0 score
             scored_ids = {x["candidate_id"] for x in scored_candidates}
             for c in candidates:
                 if c["candidate_id"] not in scored_ids:
@@ -652,7 +597,6 @@ def main():
                     })
                     
         scored_candidates = [x for x in scored_candidates if x["score"] > 0.0]
-        # Sort and rank (tie-break: score desc, then rule_strength desc, then candidate_id asc)
         scored_candidates.sort(key=lambda x: (
             -round(x["score"], 4), 
             -calculate_rule_strength(x["candidate"], None), 
@@ -660,7 +604,6 @@ def main():
         ))
         top_items = scored_candidates[:min(args.limit, len(scored_candidates))]
             
-    # Output top items to CSV
     rows = []
     for rank_idx, item in enumerate(top_items):
         rank = rank_idx + 1
@@ -676,7 +619,6 @@ def main():
         })
         
     rows = make_unique_reasonings(rows)
-    # Remove temporary _signals key
     for r in rows:
         if "_signals" in r:
             del r["_signals"]

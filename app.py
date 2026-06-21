@@ -5,7 +5,6 @@ import tempfile
 import os
 import json
 
-# Set up page styling
 st.set_page_config(
     page_title="Redrob AI Candidate Ranker & Explorer",
     page_icon="🎖️",
@@ -13,7 +12,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for premium styling
 st.markdown("""
     <style>
     /* Theme override & premium typography */
@@ -143,7 +141,6 @@ st.markdown("""
 st.markdown("<div class='main-title'>Redrob AI Candidate Ranker</div>", unsafe_allow_html=True)
 st.markdown("<div class='subtitle'>A premium hybrid semantic & rule-based pipeline for screening Senior AI Engineers</div>", unsafe_allow_html=True)
 
-# Default Job Description Query
 DEFAULT_JD = (
     "Senior AI Engineer with production experience in embeddings-based retrieval systems "
     "(sentence-transformers, BGE, E5, OpenAI embeddings), vector databases and hybrid search "
@@ -153,19 +150,17 @@ DEFAULT_JD = (
     "Startup product company experience. Located in India (Noida, Pune, Hyderabad, Bangalore, Mumbai, Delhi NCR)."
 )
 
-# Sidebar configuration
 st.sidebar.header("Configuration")
 st.sidebar.write("Configure the ranking system options below.")
 candidate_limit = st.sidebar.slider(
     "Number of Candidates to Output",
     min_value=10,
-    max_value=500,
+    max_value=1000,
     value=100,
     step=10,
     help="Select the maximum number of ranked candidates to return in the CSV output."
 )
 
-# Initialize Session State
 if 'results_df' not in st.session_state:
     st.session_state['results_df'] = None
 if 'candidates_details' not in st.session_state:
@@ -173,7 +168,6 @@ if 'candidates_details' not in st.session_state:
 if 'temp_input_path' not in st.session_state:
     st.session_state['temp_input_path'] = None
 
-# Main layout split
 col1, col2 = st.columns([1.5, 1])
 
 with col1:
@@ -200,12 +194,10 @@ st.write("---")
 if uploaded_file is not None:
     if st.button("Run Candidate Ranking Engine"):
         with st.status("Processing candidates...", expanded=True) as status_box:
-            # Create a temporary directory to store files
             temp_dir = tempfile.mkdtemp()
             temp_input_path = os.path.join(temp_dir, "candidates_input.jsonl")
             temp_output_path = os.path.join(temp_dir, "submission.csv")
             
-            # Save uploaded file contents
             with open(temp_input_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
@@ -213,7 +205,6 @@ if uploaded_file is not None:
             
             status_box.write("1. Saved upload. Parsing candidate metadata...")
             
-            # Parse candidate details
             candidates_details = {}
             try:
                 with open(temp_input_path, "r", encoding="utf-8") as f:
@@ -269,12 +260,10 @@ if uploaded_file is not None:
                     st.markdown("### Stdout Output:")
                     st.code(result.stdout)
 
-# Display Results & Interactive Features if available
 if st.session_state['results_df'] is not None:
     df = st.session_state['results_df'].copy()
     details = st.session_state['candidates_details']
     
-    # Enrich df with details from details dictionary if available
     for col in ['name', 'title', 'yoe', 'location', 'notice_period', 'willing_to_relocate', 'skills_count']:
         if col not in df.columns:
             df[col] = None
@@ -293,7 +282,6 @@ if st.session_state['results_df'] is not None:
             df.at[idx, 'willing_to_relocate'] = "Yes" if sig.get('willing_to_relocate', False) else "No"
             df.at[idx, 'skills_count'] = len(cand.get('skills', []))
             
-    # Identify disqualified candidates
     ranked_ids = set(df['candidate_id'].tolist())
     disqualified_candidates = []
     
@@ -304,7 +292,6 @@ if st.session_state['results_df'] is not None:
             p = cand.get('profile', {})
             sig = cand.get('redrob_signals', {})
             
-            # Diagnose reason
             if check_honeypots(cand):
                 reason = "Disqualified: Honeypot Trap (Fake Profile/Timelines)"
             elif is_unrelated_role(cand):
@@ -329,7 +316,6 @@ if st.session_state['results_df'] is not None:
                 "reason": reason
             })
             
-    # Setup interactive tabs
     tab_leaderboard, tab_explorer, tab_analytics, tab_compare = st.tabs([
         "🏆 Ranked Leaderboard", 
         "🔍 Profile Explorer", 
@@ -337,15 +323,12 @@ if st.session_state['results_df'] is not None:
         "⚖️ Compare Candidates"
     ])
     
-    # --- TAB 1: RANKED LEADERBOARD ---
     with tab_leaderboard:
         st.subheader("Leaderboard Results")
         
-        # Sub-tabs for Shortlisted vs Disqualified
         sub_tab_shortlist, sub_tab_disqualified = st.tabs(["🏆 Shortlisted Candidates", "🚫 Disqualified / Filtered Candidates"])
         
         with sub_tab_shortlist:
-            # Summary metrics
             stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
             with stat_col1:
                 st.markdown(f"<div class='stat-container'><h3>{len(df)}</h3><p style='margin:0;color:#6B7280;'>Total Shortlisted</p></div>", unsafe_allow_html=True)
@@ -361,7 +344,6 @@ if st.session_state['results_df'] is not None:
                 
             st.write("")
             
-            # Download and Sidebar filters for Table view
             dl_col, filter_col = st.columns([1, 3])
             with dl_col:
                 csv_data = st.session_state['results_df'].to_csv(index=False).encode('utf-8')
@@ -372,7 +354,6 @@ if st.session_state['results_df'] is not None:
                     mime="text/csv"
                 )
                 
-            # Table filters
             st.markdown("### Filter Candidates List")
             f_col1, f_col2, f_col3 = st.columns(3)
             with f_col1:
@@ -382,7 +363,6 @@ if st.session_state['results_df'] is not None:
             with f_col3:
                 relocate_only = st.checkbox("Willing to Relocate Only", value=False)
                 
-            # Apply filters
             if len(df) > 0:
                 filtered_df = df[df['yoe'] >= min_yoe_filter]
                 filtered_df = filtered_df[filtered_df['notice_period'] <= max_notice_filter]
@@ -429,7 +409,6 @@ if st.session_state['results_df'] is not None:
             else:
                 st.success("No candidates were disqualified in this run!")
         
-    # --- TAB 2: PROFILE EXPLORER ---
     with tab_explorer:
         st.subheader("Interactive Profile Inspector")
         selected_cid = st.selectbox("Select a candidate to inspect details:", options=df['candidate_id'].tolist())
@@ -442,12 +421,10 @@ if st.session_state['results_df'] is not None:
             skills = cand.get('skills', [])
             edu = cand.get('education', [])
             
-            # Find the row in the scoring dataframe
             score_row = df[df['candidate_id'] == selected_cid].iloc[0]
             
             st.write("---")
             
-            # Main Details Grid
             det_col1, det_col2 = st.columns([1, 2])
             
             with det_col1:
@@ -464,7 +441,6 @@ if st.session_state['results_df'] is not None:
                     </div>
                 """, unsafe_allow_html=True)
                 
-                # Behavioral & Trust Metrics
                 completeness = sig.get('profile_completeness_score', 0.0)
                 github_score = sig.get('github_activity_score', -1)
                 git_display = f"{github_score:.1f}" if github_score > 0 else "N/A"
@@ -483,7 +459,6 @@ if st.session_state['results_df'] is not None:
                 """, unsafe_allow_html=True)
                 
             with det_col2:
-                # Headline and Summary
                 st.markdown(f"**Headline:** *{p.get('headline', 'N/A')}*")
                 st.markdown(f"**Professional Summary:**\n> {p.get('summary', 'No summary provided')}")
                 
@@ -491,10 +466,8 @@ if st.session_state['results_df'] is not None:
                 st.subheader("Reasoning / Fit Assessment")
                 st.info(score_row['reasoning'])
                 
-                # Skills Display
                 st.subheader("Skills & Endorsements")
                 if skills:
-                    # Sort skills by proficiency level
                     prof_order = {"expert": 0, "advanced": 1, "intermediate": 2, "beginner": 3}
                     sorted_skills = sorted(skills, key=lambda s: prof_order.get(s.get('proficiency', 'beginner').lower(), 4))
                     
@@ -515,7 +488,6 @@ if st.session_state['results_df'] is not None:
             
             st.write("---")
             
-            # Education and Career History
             edu_col, career_col = st.columns([1, 2])
             
             with edu_col:
@@ -553,7 +525,6 @@ if st.session_state['results_df'] is not None:
                 else:
                     st.write("No career history listed.")
                     
-    # --- TAB 3: TALENT ANALYTICS ---
     with tab_analytics:
         st.subheader("Top Talent Analytics & Demographics")
         
@@ -581,7 +552,6 @@ if st.session_state['results_df'] is not None:
             loc_data.columns = ['Location', 'Count']
             st.bar_chart(loc_data, x='Location', y='Count')
             
-    # --- TAB 4: COMPARE CANDIDATES ---
     with tab_compare:
         st.subheader("Side-by-Side Comparison")
         st.write("Select up to 3 candidates to compare their credentials side-by-side:")
